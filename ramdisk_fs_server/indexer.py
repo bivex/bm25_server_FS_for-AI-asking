@@ -157,6 +157,7 @@ class IndexStore:
             child_paths.sort(key=str.lower)
 
         self._build_bm25()
+        self._warm_line_cache()
 
         return self.stats()
 
@@ -314,6 +315,23 @@ class IndexStore:
         self.content_terms_cache[model.path] = cached
         return cached
 
+    def _warm_line_cache(self) -> None:
+        warmed: dict[str, list[str]] = {}
+        for path, text in self.file_text_cache.items():
+            if path in self.file_signature_cache:
+                warmed[path] = text.splitlines() or [text]
+        self.file_lines_cache = warmed
+
+    def _peek_cached_text(self, path: str, signature: tuple[int, int, float]) -> str | None:
+        if self.file_signature_cache.get(path) != signature:
+            return None
+        return self.file_text_cache.get(path)
+
+    def _peek_cached_lines(self, path: str, signature: tuple[int, int, float]) -> list[str] | None:
+        if self.file_signature_cache.get(path) != signature:
+            return None
+        return self.file_lines_cache.get(path)
+
     def search_symbols(
         self,
         name: str,
@@ -407,11 +425,20 @@ class IndexStore:
     def get_symbol_excerpt(self, symbol: PythonSymbol, query: str, *, max_lines: int = 6, max_chars: int = 240) -> str | None:
         if self.snapshot is None:
             return None
-        root_path = Path(self.snapshot.summary.root)
         model = self.by_path.get(symbol.path)
         if model is None:
             return None
-        lines = self._get_cached_lines(root_path, symbol.path, self._model_signature(model))
+        signature = self._model_signature(model)
+        lines = self._peek_cached_lines(symbol.path, signature)
+        if lines is None:
+            text = self._peek_cached_text(symbol.path, signature)
+            if text is None:
+                file_path = Path(self.snapshot.summary.root) / symbol.path
+                try:
+                    text = file_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    return None
+            lines = text.splitlines() or [text]
         if lines is None:
             return None
         start = max(symbol.line - 1, 0)
@@ -612,16 +639,23 @@ class IndexStore:
     def get_excerpt(self, path: str, query: str, *, max_chars: int = 220) -> str | None:
         if self.snapshot is None or path not in self.content_indexed_paths:
             return None
-        root_path = Path(self.snapshot.summary.root)
         model = self.by_path.get(path)
         if model is None:
             return None
         signature = self._model_signature(model)
-        text = self._read_cached_text(root_path, path, signature)
+        text = self._peek_cached_text(path, signature)
+        if text is None:
+            file_path = Path(self.snapshot.summary.root) / path if path != "." else Path(self.snapshot.summary.root)
+            try:
+                text = file_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return None
         if text is None:
             return None
         terms = _tokenize_terms(query)
-        lines = self._get_cached_lines(root_path, path, signature)
+        lines = self._peek_cached_lines(path, signature)
+        if lines is None:
+            lines = text.splitlines() or [text]
         if lines is None:
             return None
         best_index = 0

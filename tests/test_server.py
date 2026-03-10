@@ -34,6 +34,23 @@ class AppContextTests(unittest.TestCase):
             self.assertTrue(stats["indexed"])
             self.assertIn("docs/readme.txt", context.index_store.by_path)
 
+    def test_rebuild_index_swaps_in_new_store_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "readme.txt"
+            target.write_text("hello")
+            context = AppContext(root_path=root, index_refresh_seconds=0)
+
+            context.rebuild_index()
+            first_store = context.index_store
+
+            target.write_text("hello again")
+            context.rebuild_index()
+            second_store = context.index_store
+
+            self.assertIsNot(first_store, second_store)
+            self.assertTrue(second_store.stats()["indexed"])
+
 
 class ServerIndexEndpointTests(unittest.TestCase):
     def test_index_endpoints_return_stats_and_matches(self) -> None:
@@ -185,6 +202,52 @@ class ServerIndexEndpointTests(unittest.TestCase):
                     rebuild_payload = json.load(response)
                 self.assertTrue(rebuild_payload["index"]["indexed"])
                 self.assertTrue(rebuild_payload["index"]["bm25_ready"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_read_endpoints_do_not_block_on_context_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            (root / "docs" / "readme.txt").write_text("hello")
+            context = AppContext(root_path=root, index_refresh_seconds=0)
+            context.rebuild_index()
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(context))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            results: dict[str, object] = {}
+            done = threading.Event()
+
+            def request_worker() -> None:
+                try:
+                    with urlopen(f"{base_url}/index/search?q=readme", timeout=1.0) as response:
+                        results["search"] = json.load(response)
+                    ask_request = Request(
+                        f"{base_url}/ask",
+                        method="POST",
+                        data=json.dumps({"question": "where is the readme file"}).encode("utf-8"),
+                    )
+                    ask_request.add_header("Content-Type", "application/json")
+                    with urlopen(ask_request, timeout=1.0) as response:
+                        results["ask"] = json.load(response)
+                except Exception as exc:  # pragma: no cover - surfaced by assertion below
+                    results["error"] = exc
+                finally:
+                    done.set()
+
+            try:
+                with context.lock:
+                    worker = threading.Thread(target=request_worker, daemon=True)
+                    worker.start()
+                    self.assertTrue(done.wait(timeout=1.5), "read endpoints should not wait on AppContext.lock")
+                    worker.join(timeout=1)
+                self.assertNotIn("error", results)
+                self.assertEqual(results["search"]["matches"][0]["entry"]["path"], "docs/readme.txt")
+                self.assertEqual(results["ask"]["files"][0], "docs/readme.txt")
             finally:
                 server.shutdown()
                 server.server_close()

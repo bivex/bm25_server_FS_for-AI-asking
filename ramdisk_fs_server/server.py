@@ -27,6 +27,7 @@ class AppContext:
     lock: RLock = field(default_factory=RLock)
     stop_event: Event = field(default_factory=Event)
     refresh_thread: Thread | None = None
+    rebuild_generation: int = 0
 
     def current_root(self) -> Path:
         if self.ramdisk_manager.current is not None:
@@ -44,32 +45,64 @@ class AppContext:
         return candidate
 
     def health_payload(self) -> dict[str, Any]:
-        root = None
-        try:
-            root = str(self.current_root())
-        except RuntimeError:
-            root = None
+        index_store = self.active_index_store()
+        stats = index_store.stats()
+        root = stats.get("root")
+        if not root:
+            try:
+                root = str(self.current_root())
+            except RuntimeError:
+                root = None
         ramdisk = None if self.ramdisk_manager.current is None else self.ramdisk_manager.current.to_dict()
         return {
             "status": "ok",
             "root": root,
             "ramdisk": ramdisk,
-            "index": self.index_store.stats(),
+            "index": stats,
         }
 
+    def active_index_store(self) -> IndexStore:
+        return self.index_store
+
+    def _begin_rebuild(self) -> tuple[int, Path, object | None, frozenset[str]]:
+        with self.lock:
+            self.rebuild_generation += 1
+            generation = self.rebuild_generation
+            root = self.current_root()
+            ramdisk = self.ramdisk_manager.current
+            ignored_names = self.index_store.ignored_names
+        return generation, root, ramdisk, ignored_names
+
+    def _publish_rebuilt_store(self, generation: int, store: IndexStore) -> dict[str, object]:
+        with self.lock:
+            if generation != self.rebuild_generation:
+                return self.index_store.stats()
+            self.index_store = store
+            return store.stats()
+
+    def _clear_index_if_current(self, generation: int, *, ignored_names: frozenset[str]) -> None:
+        with self.lock:
+            if generation == self.rebuild_generation:
+                self.index_store = IndexStore(ignored_names=ignored_names)
+
     def rebuild_index(self) -> dict[str, object]:
-        return self.index_store.rebuild(self.current_root(), self.ramdisk_manager.current)
+        generation, root, ramdisk, ignored_names = self._begin_rebuild()
+        next_store = IndexStore(ignored_names=ignored_names)
+        next_store.rebuild(root, ramdisk)
+        return self._publish_rebuilt_store(generation, next_store)
 
     def rebuild_index_if_possible(self) -> dict[str, object] | None:
+        generation, root, ramdisk, ignored_names = self._begin_rebuild()
         try:
-            return self.rebuild_index()
+            next_store = IndexStore(ignored_names=ignored_names)
+            next_store.rebuild(root, ramdisk)
         except (FileNotFoundError, RuntimeError):
-            self.index_store.clear()
+            self._clear_index_if_current(generation, ignored_names=ignored_names)
             return None
+        return self._publish_rebuilt_store(generation, next_store)
 
     def start_indexing(self) -> None:
-        with self.lock:
-            self.rebuild_index_if_possible()
+        self.rebuild_index_if_possible()
         if self.index_refresh_seconds <= 0:
             return
         self.stop_event.clear()
@@ -84,8 +117,7 @@ class AppContext:
 
     def _refresh_loop(self) -> None:
         while not self.stop_event.wait(self.index_refresh_seconds):
-            with self.lock:
-                self.rebuild_index_if_possible()
+            self.rebuild_index_if_possible()
 
 
 def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
@@ -130,16 +162,16 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
             suffix = params.get("suffix", [None])[0]
             path_prefix = params.get("path_prefix", [None])[0]
             limit = int(params.get("limit", ["50"])[0])
-            with context.lock:
-                matches = context.index_store.search_with_scores(
-                    query,
-                    content_query=content_query,
-                    entry_type=entry_type,
-                    suffix=suffix,
-                    path_prefix=path_prefix,
-                    limit=limit,
-                )
-                stats = context.index_store.stats()
+            index_store = context.active_index_store()
+            matches = index_store.search_with_scores(
+                query,
+                content_query=content_query,
+                entry_type=entry_type,
+                suffix=suffix,
+                path_prefix=path_prefix,
+                limit=limit,
+            )
+            stats = index_store.stats()
             self._send_json(
                 200,
                 {
@@ -165,33 +197,33 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
             requested_path = params.get("path", [None])[0]
-            with context.lock:
-                entry = context.index_store.get_by_path(str(requested_path))
-                self._send_json(
-                    200,
-                    {
-                        "path": entry.path,
-                        "content_indexed": entry.path in context.index_store.content_indexed_paths,
-                        "entry": entry.to_dict(),
-                    },
-                )
+            index_store = context.active_index_store()
+            entry = index_store.get_by_path(str(requested_path))
+            self._send_json(
+                200,
+                {
+                    "path": entry.path,
+                    "content_indexed": entry.path in index_store.content_indexed_paths,
+                    "entry": entry.to_dict(),
+                },
+            )
 
         def _handle_index_children(self) -> None:
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
             requested_path = params.get("path", ["."])[0]
-            with context.lock:
-                parent = context.index_store.get_by_path(requested_path)
-                children = context.index_store.get_children(requested_path)
-                self._send_json(
-                    200,
-                    {
-                        "path": parent.path,
-                        "entry": parent.to_dict(),
-                        "count": len(children),
-                        "children": [child.to_dict() for child in children],
-                    },
-                )
+            index_store = context.active_index_store()
+            parent = index_store.get_by_path(requested_path)
+            children = index_store.get_children(requested_path)
+            self._send_json(
+                200,
+                {
+                    "path": parent.path,
+                    "entry": parent.to_dict(),
+                    "count": len(children),
+                    "children": [child.to_dict() for child in children],
+                },
+            )
 
         def _handle_index_symbols(self) -> None:
             parsed = urlparse(self.path)
@@ -200,8 +232,8 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
             kind = params.get("kind", [None])[0]
             path_prefix = params.get("path_prefix", [None])[0]
             limit = int(params.get("limit", ["20"])[0])
-            with context.lock:
-                matches = context.index_store.search_symbols(name, kind=kind, path_prefix=path_prefix, limit=limit)
+            index_store = context.active_index_store()
+            matches = index_store.search_symbols(name, kind=kind, path_prefix=path_prefix, limit=limit)
             self._send_json(
                 200,
                 {
@@ -210,7 +242,7 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
                     "matches": [
                         {
                             **symbol.to_dict(),
-                            "excerpt": context.index_store.get_symbol_excerpt(symbol, name or symbol.name),
+                            "excerpt": index_store.get_symbol_excerpt(symbol, name or symbol.name),
                         }
                         for symbol in matches
                     ],
@@ -223,8 +255,8 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
             name = params.get("name", [""])[0]
             path_prefix = params.get("path_prefix", [None])[0]
             limit = int(params.get("limit", ["20"])[0])
-            with context.lock:
-                matches = context.index_store.find_symbol_usages(name, path_prefix=path_prefix, limit=limit)
+            index_store = context.active_index_store()
+            matches = index_store.find_symbol_usages(name, path_prefix=path_prefix, limit=limit)
             self._send_json(
                 200,
                 {
@@ -238,8 +270,7 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
             question = params.get("q", [""])[0]
-            with context.lock:
-                payload = answer_question(question, context.index_store)
+            payload = answer_question(question, context.active_index_store())
             self._send_json(200, payload)
 
         def do_GET(self) -> None:  # noqa: N802
@@ -279,8 +310,7 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/fs/snapshot":
                     self._handle_snapshot()
                 elif parsed.path == "/index/stats":
-                    with context.lock:
-                        self._send_json(200, {"index": context.index_store.stats()})
+                    self._send_json(200, {"index": context.active_index_store().stats()})
                 elif parsed.path == "/index/file":
                     self._handle_index_file()
                 elif parsed.path == "/index/children":
@@ -308,28 +338,29 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             try:
                 payload = self._read_json()
-                with context.lock:
-                    if parsed.path == "/ramdisk/create":
+                if parsed.path == "/ramdisk/create":
+                    with context.lock:
                         info = context.ramdisk_manager.create(
                             size_mb=int(payload.get("size_mb", 256)),
                             label=str(payload.get("label", "SQLFSRAM")),
                             fs_type=str(payload.get("fs_type", "HFS+")),
                         )
-                        context.rebuild_index_if_possible()
-                        self._send_json(201, {"ramdisk": info.to_dict()})
-                    elif parsed.path == "/index/rebuild":
-                        stats = context.rebuild_index()
-                        self._send_json(200, {"index": stats})
-                    elif parsed.path == "/ask":
-                        question = str(payload.get("question") or payload.get("q") or "")
-                        response = answer_question(question, context.index_store)
-                        self._send_json(200, response)
-                    elif parsed.path == "/ramdisk/destroy":
+                    context.rebuild_index_if_possible()
+                    self._send_json(201, {"ramdisk": info.to_dict()})
+                elif parsed.path == "/index/rebuild":
+                    stats = context.rebuild_index()
+                    self._send_json(200, {"index": stats})
+                elif parsed.path == "/ask":
+                    question = str(payload.get("question") or payload.get("q") or "")
+                    response = answer_question(question, context.active_index_store())
+                    self._send_json(200, response)
+                elif parsed.path == "/ramdisk/destroy":
+                    with context.lock:
                         context.ramdisk_manager.destroy()
-                        context.rebuild_index_if_possible()
-                        self._send_json(200, {"status": "destroyed"})
-                    else:
-                        self._send_json(404, {"error": f"Unknown endpoint: {parsed.path}"})
+                    context.rebuild_index_if_possible()
+                    self._send_json(200, {"status": "destroyed"})
+                else:
+                    self._send_json(404, {"error": f"Unknown endpoint: {parsed.path}"})
             except subprocess.CalledProcessError as exc:
                 self._send_json(500, {"error": exc.stderr or str(exc)})
             except ValueError as exc:

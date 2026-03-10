@@ -175,6 +175,40 @@ Relevant stats fields:
 - `bm25_documents`
 - `bm25_avg_document_length`
 
+## Performance matrix
+
+Measured on the current repository using Python's `ThreadingHTTPServer` with the in-memory index already built.
+
+Legend:
+
+- 🟢 excellent / low latency
+- 🟡 good / light contention
+- 🟠 moderate contention
+- 🔴 heavy contention
+
+### Read-path concurrency snapshot
+
+| Endpoint | 1 thread | 4 threads | 16 threads | 32 threads | Notes |
+|---|---:|---:|---:|---:|---|
+| `GET /health` | 🟢 4462 RPS / p95 0.25 ms | 🟢 4646 RPS / p95 1.24 ms | 🟠 2590 RPS / p95 30.72 ms | 🟠 2492 RPS / p95 61.16 ms | mostly control-path overhead |
+| `GET /index/search?q=readme` | 🟢 3142 RPS / p95 0.63 ms | 🟢 2974 RPS / p95 3.51 ms | 🟠 1766 RPS / p95 2.99 ms | 🟠 2529 RPS / p95 32.39 ms | lock-free reads, CPU-bound tails remain |
+| `GET /ask?q=where is the readme file` | 🟢 3365 RPS / p95 0.32 ms | 🟢 3400 RPS / p95 1.66 ms | 🟠 1871 RPS / p95 32.01 ms | 🟠 2420 RPS / p95 62.02 ms | NL parsing + excerpts dominate tail latency |
+| `GET /index/usages?name=IndexStore` | 🟢 2156 RPS / p95 0.50 ms | 🟡 2120 RPS / p95 2.84 ms | 🟠 1780 RPS / p95 33.52 ms | 🔴 1485 RPS / p95 64.72 ms | heaviest tested read endpoint |
+
+### Rebuild impact under load
+
+| Scenario | Throughput | Latency | Status | Notes |
+|---|---:|---:|---|---|
+| `GET /ask` baseline @ 16 concurrent readers | 🟢 2257 RPS | 🟠 p95 32.79 ms / p99 62.41 ms | 🟢 | healthy steady-state read load |
+| `GET /ask` while `rebuild_index()` runs continuously | 🔴 918 RPS | 🔴 p95 35.83 ms / p99 336.05 ms | 🔴 | readers no longer block on the old global read lock, but rebuilds still compete for CPU/GIL |
+
+### Practical takeaways
+
+- 🟢 Single-request and light-concurrency performance is strong.
+- 🟢 Lock-free read paths improved concurrent `/ask` and `/index/search` behavior.
+- 🟠 Tail latency still grows at `16-32` concurrent clients because handlers are CPU-bound Python code.
+- 🔴 Continuous rebuilds are now the main remaining performance hazard under load.
+
 ## Tests
 
 ```bash

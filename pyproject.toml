@@ -1,0 +1,9 @@
+[project]
+name = "sqlfs-ramdisk-server"
+version = "0.1.0"
+description = "macOS RAM disk HTTP server that exposes filesystem models and tree snapshots"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

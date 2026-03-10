@@ -7,11 +7,17 @@ from pathlib import Path
 from .models import PythonSymbol
 
 
-def extract_python_symbols(file_path: Path, relative_path: str) -> tuple[list[PythonSymbol], Counter[str]]:
-    try:
-        source = file_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return [], Counter()
+def extract_python_symbols(
+    file_path: Path,
+    relative_path: str,
+    *,
+    source: str | None = None,
+) -> tuple[list[PythonSymbol], Counter[str]]:
+    if source is None:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return [], Counter()
     try:
         tree = ast.parse(source, filename=str(file_path))
     except SyntaxError:

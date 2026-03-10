@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ramdisk_fs_server.indexer import IndexStore
+from ramdisk_fs_server.python_symbols import extract_python_symbols as real_extract_python_symbols
 
 
 class IndexStoreTests(unittest.TestCase):
@@ -145,6 +147,30 @@ class IndexStoreTests(unittest.TestCase):
             related_tests = store.find_related_tests("rebuild_index")
             self.assertEqual(related_tests[0].path, "tests/test_service.py")
             self.assertIn("test_rebuild_index", related_tests[0].qualname)
+
+    def test_rebuild_reuses_python_symbol_cache_until_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "service.py"
+            target.write_text(
+                "def rebuild_index():\n"
+                "    return 1\n"
+            )
+
+            store = IndexStore()
+            with patch("ramdisk_fs_server.indexer.extract_python_symbols", wraps=real_extract_python_symbols) as mocked:
+                store.rebuild(root)
+                self.assertEqual(mocked.call_count, 1)
+
+                store.rebuild(root)
+                self.assertEqual(mocked.call_count, 1)
+
+                target.write_text(
+                    "def rebuild_index():\n"
+                    "    return 2\n"
+                )
+                store.rebuild(root)
+                self.assertEqual(mocked.call_count, 2)
 
 
 if __name__ == "__main__":

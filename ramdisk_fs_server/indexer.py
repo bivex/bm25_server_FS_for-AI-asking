@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Callable
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,7 @@ def _tokenize_terms(value: str) -> list[str]:
 class IndexStore:
     snapshot: FsSnapshot | None = None
     last_built_at: float | None = None
+    cache_root: str | None = None
     ignored_names: frozenset[str] = field(default_factory=lambda: DEFAULT_IGNORED_NAMES)
     by_path: dict[str, FsEntryModel] = field(default_factory=dict)
     token_index: dict[str, set[str]] = field(default_factory=dict)
@@ -68,19 +70,25 @@ class IndexStore:
     content_indexed_paths: set[str] = field(default_factory=set)
     text_files_indexed: int = 0
     text_bytes_indexed: int = 0
+    file_text_cache: dict[str, str] = field(default_factory=dict)
+    file_lines_cache: dict[str, list[str]] = field(default_factory=dict)
+    file_signature_cache: dict[str, tuple[int, int, float]] = field(default_factory=dict)
+    content_terms_cache: dict[str, list[str]] = field(default_factory=dict)
     python_symbols: list[PythonSymbol] = field(default_factory=list)
     symbols_by_path: dict[str, list[PythonSymbol]] = field(default_factory=dict)
     symbol_index: dict[str, list[PythonSymbol]] = field(default_factory=dict)
     qualname_index: dict[str, list[PythonSymbol]] = field(default_factory=dict)
+    symbol_definition_paths: dict[str, set[str]] = field(default_factory=dict)
     symbol_reference_index: dict[str, Counter[str]] = field(default_factory=dict)
     test_symbols: list[PythonSymbol] = field(default_factory=list)
+    python_symbol_cache: dict[str, tuple[tuple[int, int, float], list[PythonSymbol], Counter[str]]] = field(default_factory=dict)
     bm25_term_frequencies: dict[str, Counter[str]] = field(default_factory=dict)
     bm25_document_frequencies: Counter[str] = field(default_factory=Counter)
     bm25_document_lengths: dict[str, int] = field(default_factory=dict)
     bm25_average_document_length: float = 0.0
     bm25_ready: bool = False
 
-    def clear(self) -> None:
+    def clear(self, *, preserve_file_caches: bool = False) -> None:
         self.snapshot = None
         self.last_built_at = None
         self.by_path.clear()
@@ -97,8 +105,16 @@ class IndexStore:
         self.symbols_by_path.clear()
         self.symbol_index.clear()
         self.qualname_index.clear()
+        self.symbol_definition_paths.clear()
         self.symbol_reference_index.clear()
         self.test_symbols.clear()
+        if not preserve_file_caches:
+            self.cache_root = None
+            self.file_text_cache.clear()
+            self.file_lines_cache.clear()
+            self.file_signature_cache.clear()
+            self.content_terms_cache.clear()
+            self.python_symbol_cache.clear()
         self.bm25_term_frequencies.clear()
         self.bm25_document_frequencies.clear()
         self.bm25_document_lengths.clear()
@@ -107,11 +123,12 @@ class IndexStore:
 
     def rebuild(self, root: str | Path, ramdisk: RamDiskInfo | None = None) -> dict[str, object]:
         snapshot = build_snapshot(root, ramdisk, ignore_names=self.ignored_names)
-        self.clear()
+        root_path = Path(snapshot.summary.root)
+        self._prepare_rebuild_caches(root_path, snapshot.models)
+        self.clear(preserve_file_caches=True)
         self.snapshot = snapshot
         self.last_built_at = time.time()
 
-        root_path = Path(snapshot.summary.root)
         for model in snapshot.models:
             self.by_path[model.path] = model
             for token in _tokenize(f"{model.name} {model.path}"):
@@ -225,6 +242,78 @@ class IndexStore:
             raise ValueError(f"Path is not a directory: {parent.path}")
         return [self.by_path[child_path] for child_path in self.children_index.get(parent.path, [])]
 
+    def _prepare_rebuild_caches(self, root_path: Path, models: list[FsEntryModel]) -> None:
+        root_str = str(root_path)
+        if self.cache_root != root_str:
+            self.cache_root = root_str
+            self.file_text_cache.clear()
+            self.file_lines_cache.clear()
+            self.file_signature_cache.clear()
+            self.content_terms_cache.clear()
+            self.python_symbol_cache.clear()
+            return
+        active_paths = {model.path for model in models if model.entry_type == "file"}
+        for cache in (
+            self.file_text_cache,
+            self.file_lines_cache,
+            self.file_signature_cache,
+            self.content_terms_cache,
+            self.python_symbol_cache,
+        ):
+            for path in list(cache.keys()):
+                if path not in active_paths:
+                    del cache[path]
+
+    def _model_signature(self, model: FsEntryModel) -> tuple[int, int, float]:
+        return (model.inode, model.size_bytes, model.modified_at)
+
+    def _read_cached_text(self, root_path: Path, path: str, signature: tuple[int, int, float]) -> str | None:
+        cached_signature = self.file_signature_cache.get(path)
+        cached = self.file_text_cache.get(path)
+        if cached is not None and cached_signature == signature:
+            return cached
+        if cached_signature != signature:
+            self.file_lines_cache.pop(path, None)
+            self.content_terms_cache.pop(path, None)
+            self.python_symbol_cache.pop(path, None)
+        if cached is not None:
+            self.file_text_cache.pop(path, None)
+        file_path = root_path if path == "." else root_path / path
+        try:
+            cached = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        self.file_text_cache[path] = cached
+        self.file_signature_cache[path] = signature
+        return cached
+
+    def _get_cached_lines(self, root_path: Path, path: str, signature: tuple[int, int, float]) -> list[str] | None:
+        cached = self.file_lines_cache.get(path)
+        if cached is not None and self.file_signature_cache.get(path) == signature:
+            return cached
+        if cached is not None:
+            self.file_lines_cache.pop(path, None)
+        text = self._read_cached_text(root_path, path, signature)
+        if text is None:
+            return None
+        cached = text.splitlines() or [text]
+        self.file_lines_cache[path] = cached
+        return cached
+
+    def _get_cached_content_terms(self, root_path: Path, model: FsEntryModel) -> list[str] | None:
+        cached = self.content_terms_cache.get(model.path)
+        signature = self._model_signature(model)
+        if cached is not None and self.file_signature_cache.get(model.path) == signature:
+            return cached
+        if cached is not None:
+            self.content_terms_cache.pop(model.path, None)
+        text = self._read_cached_text(root_path, model.path, signature)
+        if text is None:
+            return None
+        cached = _tokenize_terms(text)
+        self.content_terms_cache[model.path] = cached
+        return cached
+
     def search_symbols(
         self,
         name: str,
@@ -273,16 +362,12 @@ class IndexStore:
                 prefix = path_prefix.strip("/")
                 if not (path == prefix or path.startswith(f"{prefix}/")):
                     continue
-            symbol_defs = [
-                symbol
-                for symbol in self.search_symbols(name, path_prefix=path, limit=50)
-                if symbol.kind in {"class", "function", "method"}
-            ]
+            definition_paths = self.symbol_definition_paths.get(normalized, set())
             rows.append(
                 {
                     "path": path,
                     "count": count,
-                    "defines_symbol": any(symbol.path == path for symbol in symbol_defs),
+                    "defines_symbol": path in definition_paths,
                     "excerpt": self.get_excerpt(path, name),
                 }
             )
@@ -322,19 +407,22 @@ class IndexStore:
     def get_symbol_excerpt(self, symbol: PythonSymbol, query: str, *, max_lines: int = 6, max_chars: int = 240) -> str | None:
         if self.snapshot is None:
             return None
-        file_path = Path(self.snapshot.summary.root) / symbol.path
-        try:
-            lines = file_path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
+        root_path = Path(self.snapshot.summary.root)
+        model = self.by_path.get(symbol.path)
+        if model is None:
+            return None
+        lines = self._get_cached_lines(root_path, symbol.path, self._model_signature(model))
+        if lines is None:
             return None
         start = max(symbol.line - 1, 0)
         end = min(len(lines), max(symbol.end_line, symbol.line) + max_lines - 1)
         query_terms = _tokenize_terms(query)
+        highlighter = _build_highlighter(query_terms)
         excerpt_lines: list[str] = []
         for index in range(start, end):
             snippet = lines[index].rstrip()
-            if query_terms:
-                snippet = _highlight_terms(snippet, query_terms)
+            if highlighter is not None:
+                snippet = highlighter(snippet)
             if len(snippet) > max_chars:
                 snippet = snippet[: max_chars - 1] + "…"
             excerpt_lines.append(f"line {index + 1}: {snippet}")
@@ -409,27 +497,22 @@ class IndexStore:
             prefix = "." if path_prefix in {"", "."} else path_prefix.strip("/")
             candidates = {path for path in candidates if path == prefix or path.startswith(f"{prefix}/")}
 
-        ranked_paths = sorted(
-            candidates,
-            key=lambda path: (-self._bm25_score(path, bm25_tokens), path.lower()),
-        )
-        results = [(self.by_path[path], self._bm25_score(path, bm25_tokens)) for path in ranked_paths]
-        return results[: max(limit, 0)]
+        scored = [(path, self._bm25_score(path, bm25_tokens)) for path in candidates]
+        scored.sort(key=lambda item: (-item[1], item[0].lower()))
+        return [(self.by_path[path], score) for path, score in scored[: max(limit, 0)]]
 
     def _index_content(self, root_path: Path, model: FsEntryModel) -> None:
         if not self._should_index_content(model):
             return
-        file_path = root_path if model.path == "." else root_path / model.path
-        try:
-            content = file_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        content_terms = self._get_cached_content_terms(root_path, model)
+        if content_terms is None:
             return
-        tokens = _tokenize(content)
+        tokens = set(content_terms)
         if not tokens:
             return
         self.content_indexed_paths.add(model.path)
         self.text_files_indexed += 1
-        self.text_bytes_indexed += len(content.encode("utf-8"))
+        self.text_bytes_indexed += model.size_bytes
         for token in tokens:
             self.content_index.setdefault(token, set()).add(model.path)
 
@@ -437,7 +520,14 @@ class IndexStore:
         if model.entry_type != "file" or (model.suffix or "").lower() != ".py":
             return
         file_path = root_path / model.path if model.path != "." else root_path
-        symbols, references = extract_python_symbols(file_path, model.path)
+        signature = self._model_signature(model)
+        cached = self.python_symbol_cache.get(model.path)
+        if cached is not None and cached[0] == signature:
+            symbols, references = cached[1], cached[2]
+        else:
+            source = self._read_cached_text(root_path, model.path, signature)
+            symbols, references = extract_python_symbols(file_path, model.path, source=source)
+            self.python_symbol_cache[model.path] = (signature, symbols, references)
         if not symbols and not references:
             return
         self.python_symbols.extend(symbols)
@@ -445,6 +535,9 @@ class IndexStore:
         for symbol in symbols:
             self.symbol_index.setdefault(symbol.name.lower(), []).append(symbol)
             self.qualname_index.setdefault(symbol.qualname.lower(), []).append(symbol)
+            if symbol.kind in {"class", "function", "method"}:
+                self.symbol_definition_paths.setdefault(symbol.name.lower(), set()).add(symbol.path)
+                self.symbol_definition_paths.setdefault(symbol.qualname.lower(), set()).add(symbol.path)
             if symbol.is_test:
                 self.test_symbols.append(symbol)
         for reference_name, count in references.items():
@@ -467,8 +560,9 @@ class IndexStore:
 
     def _build_bm25(self) -> None:
         total_length = 0
+        root_path = Path(self.snapshot.summary.root) if self.snapshot is not None else None
         for path, model in self.by_path.items():
-            terms = self._document_terms(model)
+            terms = self._document_terms(model, root_path=root_path)
             if not terms:
                 continue
             term_freq = Counter(terms)
@@ -481,19 +575,15 @@ class IndexStore:
         self.bm25_average_document_length = total_length / doc_count if doc_count else 0.0
         self.bm25_ready = doc_count > 0
 
-    def _document_terms(self, model: FsEntryModel) -> list[str]:
+    def _document_terms(self, model: FsEntryModel, *, root_path: Path | None = None) -> list[str]:
         terms: list[str] = []
         metadata_terms = _tokenize_terms(f"{model.name} {model.path}")
         terms.extend(metadata_terms)
         terms.extend(metadata_terms)
-        if model.path in self.content_indexed_paths and self.snapshot is not None:
-            root_path = Path(self.snapshot.summary.root)
-            file_path = root_path / model.path if model.path != "." else root_path
-            try:
-                content = file_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                return terms
-            terms.extend(_tokenize_terms(content))
+        if model.path in self.content_indexed_paths and root_path is not None:
+            content_terms = self._get_cached_content_terms(root_path, model)
+            if content_terms is not None:
+                terms.extend(content_terms)
         return terms
 
     def _bm25_score(self, path: str, query_terms: list[str]) -> float:
@@ -523,13 +613,17 @@ class IndexStore:
         if self.snapshot is None or path not in self.content_indexed_paths:
             return None
         root_path = Path(self.snapshot.summary.root)
-        file_path = root_path / path if path != "." else root_path
-        try:
-            text = file_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        model = self.by_path.get(path)
+        if model is None:
+            return None
+        signature = self._model_signature(model)
+        text = self._read_cached_text(root_path, path, signature)
+        if text is None:
             return None
         terms = _tokenize_terms(query)
-        lines = text.splitlines() or [text]
+        lines = self._get_cached_lines(root_path, path, signature)
+        if lines is None:
+            return None
         best_index = 0
         best_score = -1
         if terms:
@@ -549,13 +643,14 @@ class IndexStore:
                 return f"path match: {_highlight_terms(path, terms)}"
         start = max(0, best_index - 1)
         end = min(len(lines), best_index + 2)
+        highlighter = _build_highlighter(terms)
         excerpt_lines: list[str] = []
         for index in range(start, end):
             snippet = lines[index].strip()
             if not snippet:
                 continue
-            if terms:
-                snippet = _highlight_terms(snippet, terms)
+            if highlighter is not None:
+                snippet = highlighter(snippet)
             if len(snippet) > max_chars:
                 snippet = snippet[: max_chars - 1] + "…"
             excerpt_lines.append(f"line {index + 1}: {snippet}")
@@ -572,9 +667,20 @@ class IndexStore:
 
 
 def _highlight_terms(text: str, terms: list[str]) -> str:
-    highlighted = text
+    highlighter = _build_highlighter(terms)
+    return text if highlighter is None else highlighter(text)
+
+
+def _build_highlighter(terms: list[str]) -> Callable[[str], str] | None:
     unique_terms = sorted({term for term in terms if term}, key=len, reverse=True)
-    for term in unique_terms:
-        pattern = re.compile(re.escape(term), re.IGNORECASE)
-        highlighted = pattern.sub(lambda match: HIGHLIGHT_TEMPLATE.format(term=match.group(0)), highlighted)
-    return highlighted
+    if not unique_terms:
+        return None
+    patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in unique_terms]
+
+    def highlight(text: str) -> str:
+        highlighted = text
+        for pattern in patterns:
+            highlighted = pattern.sub(lambda match: HIGHLIGHT_TEMPLATE.format(term=match.group(0)), highlighted)
+        return highlighted
+
+    return highlight

@@ -1,25 +1,25 @@
 # SQLFS RAM Disk Server
 
-Небольшой Python-проект для macOS, который:
+A small Python project for macOS that:
 
-- создаёт RAM disk через `hdiutil` + `diskutil`
-- поднимает HTTP JSON API
-- показывает содержимое корня как набор моделей и дерево с технической информацией
-- автоматически инициализирует **BM25 search index** при старте сервера и держит его в RAM
+- creates a RAM disk via `hdiutil` + `diskutil`
+- serves an HTTP JSON API
+- exposes the root contents as typed models and a tree with technical file metadata
+- automatically initializes a **BM25 search index** at server startup and keeps it in RAM
 
-## Запуск
+## Run
 
 ```bash
 python3 -m ramdisk_fs_server --root . --port 8000
 ```
 
-или сразу с RAM disk:
+Or start it directly with a RAM disk:
 
 ```bash
 python3 -m ramdisk_fs_server --create-ramdisk --size-mb 256 --label SQLFSRAM --destroy-on-exit
 ```
 
-## Эндпоинты
+## Endpoints
 
 - `GET /health`
 - `GET /fs/models`
@@ -32,13 +32,13 @@ python3 -m ramdisk_fs_server --create-ramdisk --size-mb 256 --label SQLFSRAM --d
 - `GET /index/search?content=alpha`
 - `GET /index/symbols?name=rebuild_index&kind=function`
 - `GET /index/usages?name=IndexStore`
-- `GET /ask?q=где+лежит+readme`
+- `GET /ask?q=where+is+readme`
 - `POST /ramdisk/create`
 - `POST /index/rebuild`
 - `POST /ask`
 - `POST /ramdisk/destroy`
 
-Пример создания RAM disk:
+Example RAM disk creation:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ramdisk/create \
@@ -46,83 +46,83 @@ curl -X POST http://127.0.0.1:8000/ramdisk/create \
   -d '{"size_mb":256,"label":"SQLFSRAM","fs_type":"HFS+"}'
 ```
 
-Пример snapshot:
+Example snapshot request:
 
 ```bash
 curl http://127.0.0.1:8000/fs/snapshot | python3 -m json.tool
 ```
 
-Пример поиска по индексу:
+Example index search:
 
 ```bash
 curl 'http://127.0.0.1:8000/index/search?q=readme&suffix=.txt' | python3 -m json.tool
 ```
 
-Ответ `index/search` ранжируется через **BM25** и возвращает `score` для каждого совпадения.
+`index/search` is ranked with **BM25** and returns a `score` for every match.
 
-По умолчанию индекс **игнорирует** директории:
+By default the index **ignores** these directories:
 
 - `__pycache__`
 - `.git`
 - `node_modules`
 - `.venv`
 
-Пример lookup по пути и детям директории:
+Example path lookup and directory children lookup:
 
 ```bash
 curl 'http://127.0.0.1:8000/index/file?path=README.md' | python3 -m json.tool
 curl 'http://127.0.0.1:8000/index/children?path=tests' | python3 -m json.tool
 ```
 
-Пример поиска по содержимому текстовых файлов:
+Example text-content search:
 
 ```bash
 curl 'http://127.0.0.1:8000/index/search?content=ramdisk' | python3 -m json.tool
 ```
 
-Пример Python symbol / usage поиска:
+Example Python symbol and usage search:
 
 ```bash
 curl 'http://127.0.0.1:8000/index/symbols?name=rebuild_index&kind=function' | python3 -m json.tool
 curl 'http://127.0.0.1:8000/index/usages?name=IndexStore' | python3 -m json.tool
 ```
 
-Пример natural-language поиска:
+Example natural-language search:
 
 ```bash
-curl -G --data-urlencode 'q=где лежит readme' http://127.0.0.1:8000/ask | python3 -m json.tool
-curl -G --data-urlencode 'q=покажи только директории в tests' http://127.0.0.1:8000/ask | python3 -m json.tool
-curl -G --data-urlencode 'q=где функция rebuild_index' http://127.0.0.1:8000/ask | python3 -m json.tool
-curl -G --data-urlencode 'q=кто использует IndexStore' http://127.0.0.1:8000/ask | python3 -m json.tool
-curl -G --data-urlencode 'q=где тесты для answer_question' http://127.0.0.1:8000/ask | python3 -m json.tool
+curl -G --data-urlencode 'q=where is readme' http://127.0.0.1:8000/ask | python3 -m json.tool
+curl -G --data-urlencode 'q=show only directories inside tests' http://127.0.0.1:8000/ask | python3 -m json.tool
+curl -G --data-urlencode 'q=where function rebuild_index' http://127.0.0.1:8000/ask | python3 -m json.tool
+curl -G --data-urlencode 'q=who uses IndexStore' http://127.0.0.1:8000/ask | python3 -m json.tool
+curl -G --data-urlencode 'q=where tests for answer_question' http://127.0.0.1:8000/ask | python3 -m json.tool
 curl -X POST http://127.0.0.1:8000/ask \
   -H 'Content-Type: application/json' \
-  -d '{"question":"где лежит файл readme"}' | python3 -m json.tool
+  -d '{"question":"where is the readme file"}' | python3 -m json.tool
 ```
 
-## Natural language search architecture
+## Natural-language search architecture
 
-Текущий `GET/POST /ask` endpoint работает без embeddings и без отдельной LLM:
+The current `GET/POST /ask` endpoint works without embeddings and without a separate LLM:
 
-- rule-based разбор вопроса
-- `path_prefix` разбор из фраз вроде `в tests`, `inside tests`, `path_prefix=tests`
-- Python symbol index: `class`, `function`, `method`, `import`, test symbols
-- BM25 для ранжирования кандидатов
-- symbol usage index по AST references (`Name` / `Attribute`)
-- tree context через путь/родительскую директорию
-- content excerpts для текстовых файлов с подсветкой совпавших терминов
+- rule-based question parsing
+- `path_prefix` extraction from phrases such as `in tests`, `inside tests`, or `path_prefix=tests`
+- Python symbol index for `class`, `function`, `method`, `import`, and test symbols
+- BM25 for candidate ranking
+- symbol usage index based on AST references (`Name` / `Attribute`)
+- tree context via path and parent directory
+- content excerpts for text files with highlighted matching terms
 
-Сеньорские вопросы, которые теперь поддерживаются:
+Senior-oriented questions currently supported:
 
-- `где функция rebuild_index`
-- `кто использует IndexStore`
-- `где тесты для answer_question`
+- `where function rebuild_index`
+- `who uses IndexStore`
+- `where tests for answer_question`
 
-Пример ответа:
+Representative response shape:
 
 ```json
 {
-  "answer": "Самый релевантный путь: README.md",
+  "answer": "<summary text>",
   "files": ["README.md"],
   "matches": [
     {
@@ -135,36 +135,38 @@ curl -X POST http://127.0.0.1:8000/ask \
 }
 ```
 
-Рекомендуемый следующий слой для более умного поиска с LLM:
+## Recommended next layer for LLM-powered search
 
-- `index` — быстрый поиск по имени, пути, типу, suffix и content tokens
-- `tree` — структура директорий для навигации и контекста
-- `content excerpts` — короткие фрагменты релевантных текстовых файлов
-- `LLM` — отвечает по подготовленному контексту и возвращает итоговый список файлов
+For a more advanced LLM layer on top of the current system, use:
 
-Рекомендуемый flow:
+- `index` — fast lookup by name, path, type, suffix, and content tokens
+- `tree` — directory structure for navigation and context
+- `content excerpts` — short relevant snippets from text files
+- `LLM` — answers using the prepared context and returns the final file list
 
-1. пользователь отправляет вопрос вроде `где лежит файл readme`
-2. сервер использует индекс для предварительного отбора кандидатов
-3. сервер добавляет tree context и excerpts из найденных текстовых файлов
-4. LLM получает только этот суженный контекст, без embeddings
-5. сервер возвращает текстовый ответ и список файлов
+Recommended flow:
 
-В этой схеме LLM уже получает суженный контекст из `index + tree + excerpts`, а не весь проект целиком.
+1. the user asks a question such as `where is the readme file`
+2. the server uses the index to preselect candidates
+3. the server adds tree context and excerpts from relevant text files
+4. the LLM receives only this narrowed context, without embeddings
+5. the server returns a text answer plus the relevant file list
+
+In this design the LLM receives narrowed context from `index + tree + excerpts`, not the entire project.
 
 ## BM25 runtime
 
-- BM25 **автоматически строится при старте сервера** через существующий `context.start_indexing()`
-- BM25 **не требует скачивания модели**
-- BM25 **не использует GPU**
-- BM25 хранится **в RAM / памяти процесса** и работает на CPU
+- BM25 is **built automatically at server startup** via `context.start_indexing()`
+- BM25 **does not require downloading a model**
+- BM25 **does not use the GPU**
+- BM25 lives in **RAM / process memory** and runs on the CPU
 
-Проверить состояние можно через:
+You can inspect its state via:
 
 - `GET /health`
 - `GET /index/stats`
 
-В stats есть поля:
+Relevant stats fields:
 
 - `bm25_ready`
 - `bm25_backend`
@@ -173,7 +175,7 @@ curl -X POST http://127.0.0.1:8000/ask \
 - `bm25_documents`
 - `bm25_avg_document_length`
 
-## Тесты
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v

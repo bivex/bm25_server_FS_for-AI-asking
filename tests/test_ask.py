@@ -15,7 +15,7 @@ class AskTests(unittest.TestCase):
             store = IndexStore()
             store.rebuild(root)
 
-            parsed = parse_question("покажи только директории в tests", index_store=store)
+            parsed = parse_question("show only directories inside tests", index_store=store)
 
             self.assertEqual(parsed.entry_type, "directory")
             self.assertEqual(parsed.path_prefix, "tests")
@@ -31,10 +31,11 @@ class AskTests(unittest.TestCase):
             store = IndexStore()
             store.rebuild(root)
 
-            answer = answer_question("покажи только директории в tests", store)
+            answer = answer_question("show only directories inside tests", store)
 
             self.assertEqual(answer["files"], ["tests", "tests/api", "tests/fixtures"])
-            self.assertIn("директорий внутри tests", answer["answer"])
+            self.assertEqual(answer["parsed_query"]["path_prefix"], "tests")
+            self.assertEqual(answer["parsed_query"]["entry_type"], "directory")
 
     def test_answer_question_finds_symbol_definition_usage_and_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,17 +57,17 @@ class AskTests(unittest.TestCase):
             store = IndexStore()
             store.rebuild(root)
 
-            symbol_answer = answer_question("где функция rebuild_index", store)
+            symbol_answer = answer_question("where function rebuild_index", store)
             self.assertEqual(symbol_answer["files"], ["pkg/service.py"])
-            self.assertIn("определён", symbol_answer["answer"])
+            self.assertEqual(symbol_answer["parsed_query"]["intent"], "find_symbol")
 
-            usage_answer = answer_question("кто использует IndexStore", store)
+            usage_answer = answer_question("who uses IndexStore", store)
             self.assertEqual(usage_answer["files"], ["pkg/service.py"])
-            self.assertIn("используется", usage_answer["answer"])
+            self.assertEqual(usage_answer["parsed_query"]["intent"], "find_usage")
 
-            tests_answer = answer_question("где тесты для rebuild_index", store)
+            tests_answer = answer_question("where tests for rebuild_index", store)
             self.assertEqual(tests_answer["files"], ["tests/test_service.py"])
-            self.assertIn("тест", tests_answer["answer"].lower())
+            self.assertEqual(tests_answer["parsed_query"]["intent"], "find_tests")
 
     def test_answer_question_falls_back_from_function_to_method(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,7 +81,7 @@ class AskTests(unittest.TestCase):
             store = IndexStore()
             store.rebuild(root)
 
-            answer = answer_question("где функция rebuild_index", store)
+            answer = answer_question("where function rebuild_index", store)
 
             self.assertEqual(answer["files"], ["pkg/service.py"])
             self.assertEqual(answer["matches"][0]["kind"], "method")

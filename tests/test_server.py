@@ -110,34 +110,35 @@ class ServerIndexEndpointTests(unittest.TestCase):
                 ask_request = Request(
                     f"{base_url}/ask",
                     method="POST",
-                    data=json.dumps({"question": "где лежит файл readme"}).encode("utf-8"),
+                    data=json.dumps({"question": "where is the readme file"}).encode("utf-8"),
                 )
                 ask_request.add_header("Content-Type", "application/json")
                 with urlopen(ask_request) as response:
                     ask_payload = json.load(response)
                 self.assertEqual(ask_payload["files"][0], "docs/readme.txt")
-                self.assertIn("Самый релевантный путь", ask_payload["answer"])
+                self.assertEqual(ask_payload["parsed_query"]["entry_type"], "file")
                 self.assertEqual(ask_payload["matches"][0]["path"], "docs/readme.txt")
                 self.assertIn("[[readme]]", ask_payload["matches"][0]["excerpt"])
 
-                with urlopen(f"{base_url}/ask?q=%D0%BF%D0%BE%D0%BA%D0%B0%D0%B6%D0%B8%20%D1%82%D0%BE%D0%BB%D1%8C%D0%BA%D0%BE%20%D0%B4%D0%B8%D1%80%D0%B5%D0%BA%D1%82%D0%BE%D1%80%D0%B8%D0%B8%20%D0%B2%20tests") as response:
+                with urlopen(f"{base_url}/ask?q=show%20only%20directories%20inside%20tests") as response:
                     ask_dirs_payload = json.load(response)
                 self.assertEqual(ask_dirs_payload["parsed_query"]["path_prefix"], "tests")
                 self.assertEqual(ask_dirs_payload["files"], ["tests", "tests/api"])
 
-                with urlopen(f"{base_url}/ask?q=%D0%B3%D0%B4%D0%B5%20%D1%84%D1%83%D0%BD%D0%BA%D1%86%D0%B8%D1%8F%20answer_question") as response:
+                with urlopen(f"{base_url}/ask?q=where%20function%20answer_question") as response:
                     ask_symbol_payload = json.load(response)
                 self.assertEqual(ask_symbol_payload["files"][0], "app.py")
-                self.assertIn("определён", ask_symbol_payload["answer"])
+                self.assertEqual(ask_symbol_payload["parsed_query"]["intent"], "find_symbol")
 
-                with urlopen(f"{base_url}/ask?q=%D0%BA%D1%82%D0%BE%20%D0%B8%D1%81%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D1%83%D0%B5%D1%82%20IndexStore") as response:
+                with urlopen(f"{base_url}/ask?q=who%20uses%20IndexStore") as response:
                     ask_usage_payload = json.load(response)
                 self.assertGreaterEqual(len(ask_usage_payload["files"]), 1)
-                self.assertIn("используется", ask_usage_payload["answer"])
+                self.assertEqual(ask_usage_payload["parsed_query"]["intent"], "find_usage")
 
-                with urlopen(f"{base_url}/ask?q=%D0%B3%D0%B4%D0%B5%20%D1%82%D0%B5%D1%81%D1%82%D1%8B%20%D0%B4%D0%BB%D1%8F%20answer_question") as response:
+                with urlopen(f"{base_url}/ask?q=where%20tests%20for%20answer_question") as response:
                     ask_tests_payload = json.load(response)
                 self.assertIn("tests/test_app.py", ask_tests_payload["files"])
+                self.assertEqual(ask_tests_payload["parsed_query"]["intent"], "find_tests")
             finally:
                 server.shutdown()
                 server.server_close()

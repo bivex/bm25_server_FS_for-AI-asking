@@ -688,7 +688,11 @@ class IndexStore:
         if terms:
             for index, line in enumerate(lines):
                 lowered = line.lower()
-                score = sum(lowered.count(term) for term in terms)
+                score = 0
+                for term in terms:
+                    c = lowered.count(term)
+                    if c:
+                        score += c
                 if score > best_score:
                     best_score = score
                     best_index = index

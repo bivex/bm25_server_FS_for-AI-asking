@@ -9,6 +9,20 @@ from pathlib import Path
 from .models import FsEntryModel, FsSnapshot, FsSummary, RamDiskInfo, TreeNode
 
 
+_MIME_CACHE: dict[str, str | None] = {}
+
+
+def _fast_guess_mime(name: str, suffix: str | None) -> str | None:
+    if suffix is None:
+        return None
+    suf_lower = suffix.lower()
+    if suf_lower in _MIME_CACHE:
+        return _MIME_CACHE[suf_lower]
+    mime = mimetypes.guess_type(name)[0]
+    _MIME_CACHE[suf_lower] = mime
+    return mime
+
+
 def _entry_type(mode: int, is_symlink: bool) -> str:
     if is_symlink:
         return "symlink"
@@ -52,7 +66,7 @@ def _build_entry_from_stat(
         modified_at=st.st_mtime,
         accessed_at=st.st_atime,
         suffix=suffix,
-        mime_type=mimetypes.guess_type(name)[0],
+        mime_type=_fast_guess_mime(name, suffix),
         is_symlink=is_symlink,
         symlink_target=target,
     )

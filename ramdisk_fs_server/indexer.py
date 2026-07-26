@@ -85,6 +85,8 @@ class IndexStore:
     bm25_term_frequencies: dict[str, Counter[str]] = field(default_factory=dict)
     bm25_document_frequencies: Counter[str] = field(default_factory=Counter)
     bm25_document_lengths: dict[str, int] = field(default_factory=dict)
+    bm25_doc_norms: dict[str, float] = field(default_factory=dict)
+    bm25_inverted_index: dict[str, dict[str, int]] = field(default_factory=dict)
     bm25_average_document_length: float = 0.0
     bm25_ready: bool = False
 
@@ -118,6 +120,8 @@ class IndexStore:
         self.bm25_term_frequencies.clear()
         self.bm25_document_frequencies.clear()
         self.bm25_document_lengths.clear()
+        self.bm25_doc_norms.clear()
+        self.bm25_inverted_index.clear()
         self.bm25_average_document_length = 0.0
         self.bm25_ready = False
 
@@ -157,7 +161,6 @@ class IndexStore:
             child_paths.sort(key=str.lower)
 
         self._build_bm25()
-        self._warm_line_cache()
 
         return self.stats()
 
@@ -524,9 +527,20 @@ class IndexStore:
             prefix = "." if path_prefix in {"", "."} else path_prefix.strip("/")
             candidates = {path for path in candidates if path == prefix or path.startswith(f"{prefix}/")}
 
-        scored = [(path, self._bm25_score(path, bm25_tokens)) for path in candidates]
+        scored = [(path, self._bm25_score(path, bm25_tokens, query_idfs=self._precompute_query_idfs(bm25_tokens))) for path in candidates]
         scored.sort(key=lambda item: (-item[1], item[0].lower()))
         return [(self.by_path[path], score) for path, score in scored[: max(limit, 0)]]
+
+    def _precompute_query_idfs(self, query_terms: list[str]) -> dict[str, float]:
+        if not self.bm25_ready or not query_terms:
+            return {}
+        doc_count = len(self.bm25_term_frequencies)
+        idfs: dict[str, float] = {}
+        for token in set(query_terms):
+            df = self.bm25_document_frequencies.get(token, 0)
+            if df > 0:
+                idfs[token] = math.log(1 + ((doc_count - df + 0.5) / (df + 0.5)))
+        return idfs
 
     def _index_content(self, root_path: Path, model: FsEntryModel) -> None:
         if not self._should_index_content(model):
@@ -602,6 +616,13 @@ class IndexStore:
         self.bm25_average_document_length = total_length / doc_count if doc_count else 0.0
         self.bm25_ready = doc_count > 0
 
+        if self.bm25_ready:
+            for path, term_freq in self.bm25_term_frequencies.items():
+                doc_length = self.bm25_document_lengths[path]
+                self.bm25_doc_norms[path] = BM25_K1 * (1 - BM25_B + BM25_B * (doc_length / self.bm25_average_document_length))
+                for token, freq in term_freq.items():
+                    self.bm25_inverted_index.setdefault(token, {})[path] = freq
+
     def _document_terms(self, model: FsEntryModel, *, root_path: Path | None = None) -> list[str]:
         terms: list[str] = []
         metadata_terms = _tokenize_terms(f"{model.name} {model.path}")
@@ -613,26 +634,30 @@ class IndexStore:
                 terms.extend(content_terms)
         return terms
 
-    def _bm25_score(self, path: str, query_terms: list[str]) -> float:
+    def _bm25_score(self, path: str, query_terms: list[str], query_idfs: dict[str, float] | None = None) -> float:
         if not self.bm25_ready or not query_terms:
             return 0.0
         term_freq = self.bm25_term_frequencies.get(path)
         if not term_freq:
             return 0.0
-        doc_length = self.bm25_document_lengths.get(path, 0)
-        if doc_length == 0 or self.bm25_average_document_length == 0:
-            return 0.0
+        norm = self.bm25_doc_norms.get(path)
+        if norm is None:
+            doc_length = self.bm25_document_lengths.get(path, 0)
+            if doc_length == 0 or self.bm25_average_document_length == 0:
+                return 0.0
+            norm = BM25_K1 * (1 - BM25_B + BM25_B * (doc_length / self.bm25_average_document_length))
         score = 0.0
-        doc_count = len(self.bm25_term_frequencies)
         for token in query_terms:
             frequency = term_freq.get(token, 0)
             if frequency == 0:
                 continue
-            doc_frequency = self.bm25_document_frequencies.get(token, 0)
-            numerator = doc_count - doc_frequency + 0.5
-            denominator = doc_frequency + 0.5
-            idf = math.log(1 + (numerator / denominator))
-            norm = BM25_K1 * (1 - BM25_B + BM25_B * (doc_length / self.bm25_average_document_length))
+            if query_idfs is not None and token in query_idfs:
+                idf = query_idfs[token]
+            else:
+                doc_frequency = self.bm25_document_frequencies.get(token, 0)
+                numerator = len(self.bm25_term_frequencies) - doc_frequency + 0.5
+                denominator = doc_frequency + 0.5
+                idf = math.log(1 + (numerator / denominator))
             score += idf * ((frequency * (BM25_K1 + 1)) / (frequency + norm))
         return score
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -14,7 +14,14 @@ class RamDiskInfo:
     sectors: int
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "device": self.device,
+            "mount_point": self.mount_point,
+            "label": self.label,
+            "size_mb": self.size_mb,
+            "fs_type": self.fs_type,
+            "sectors": self.sectors,
+        }
 
 
 @dataclass(slots=True)
@@ -88,7 +95,15 @@ class FsSummary:
     total_size_bytes: int
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "root": self.root,
+            "generated_at": self.generated_at,
+            "total_entries": self.total_entries,
+            "total_files": self.total_files,
+            "total_directories": self.total_directories,
+            "total_symlinks": self.total_symlinks,
+            "total_size_bytes": self.total_size_bytes,
+        }
 
 
 @dataclass(slots=True)
@@ -120,4 +135,14 @@ class PythonSymbol:
     docstring: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "name": self.name,
+            "qualname": self.qualname,
+            "kind": self.kind,
+            "path": self.path,
+            "line": self.line,
+            "end_line": self.end_line,
+            "parent": self.parent,
+            "is_test": self.is_test,
+            "docstring": self.docstring,
+        }

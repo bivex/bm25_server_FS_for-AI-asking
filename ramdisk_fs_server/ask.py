@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -149,7 +149,20 @@ class AskQuery:
     wants_list: bool = False
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        return {
+            "question": self.question,
+            "intent": self.intent,
+            "subject": self.subject,
+            "query": self.query,
+            "content_query": self.content_query,
+            "entry_type": self.entry_type,
+            "suffix": self.suffix,
+            "symbol_kind": self.symbol_kind,
+            "path_prefix": self.path_prefix,
+            "limit": self.limit,
+            "wants_location": self.wants_location,
+            "wants_list": self.wants_list,
+        }
 
 
 @lru_cache(maxsize=512)

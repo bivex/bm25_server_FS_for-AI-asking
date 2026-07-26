@@ -169,6 +169,145 @@ class IndexStore:
 
         return self.stats()
 
+    def rebuild_incremental(self, root: str | Path, ramdisk: RamDiskInfo | None = None) -> dict[str, object]:
+        """Delta-update: only re-index files that are new or have changed signatures.
+
+        Falls back to a full rebuild when the root changes or no previous snapshot exists.
+        Returns stats with an extra ``incremental_changes`` key describing what was processed.
+        """
+        if self.snapshot is None or self.cache_root != str(Path(root).expanduser().resolve()):
+            stats = self.rebuild(root, ramdisk)
+            stats["incremental_changes"] = {"mode": "full_fallback", "added": 0, "modified": 0, "removed": 0}
+            return stats
+
+        snapshot = build_snapshot(root, ramdisk, ignore_names=self.ignored_names)
+        root_path = Path(snapshot.summary.root)
+        self._prepare_rebuild_caches(root_path, snapshot.models)
+
+        # Classify changes vs previous snapshot
+        new_by_path: dict[str, FsEntryModel] = {m.path: m for m in snapshot.models}
+        old_paths = set(self.by_path)
+        new_paths = set(new_by_path)
+
+        removed_paths = old_paths - new_paths
+        added_paths = new_paths - old_paths
+        modified_paths = {
+            path for path in old_paths & new_paths
+            if self._model_signature(self.by_path[path]) != self._model_signature(new_by_path[path])
+        }
+
+        changed_paths = added_paths | modified_paths
+
+        # Nothing changed — return current stats immediately
+        if not removed_paths and not changed_paths:
+            stats = self.stats()
+            stats["incremental_changes"] = {"mode": "incremental", "added": 0, "modified": 0, "removed": 0}
+            return stats
+
+        # 1. Remove stale entries from all forward indexes
+        for path in removed_paths | modified_paths:
+            old_model = self.by_path.pop(path, None)
+            if old_model is None:
+                continue
+            # token_index
+            for token in _tokenize(f"{old_model.name} {old_model.path}"):
+                s = self.token_index.get(token)
+                if s:
+                    s.discard(path)
+                    if not s:
+                        del self.token_index[token]
+            # suffix_index
+            if old_model.suffix:
+                s = self.suffix_index.get(old_model.suffix.lower())
+                if s:
+                    s.discard(path)
+            # type_index
+            s = self.type_index.get(old_model.entry_type)
+            if s:
+                s.discard(path)
+            # mime_index
+            if old_model.mime_type:
+                s = self.mime_index.get(old_model.mime_type.lower())
+                if s:
+                    s.discard(path)
+            # content_index
+            self.content_indexed_paths.discard(path)
+            for token_set in list(self.content_index.values()):
+                token_set.discard(path)
+            # symbol indexes
+            for sym in self.symbols_by_path.pop(path, []):
+                sl = self.symbol_index.get(sym.name.lower())
+                if sl:
+                    try:
+                        sl.remove(sym)
+                    except ValueError:
+                        pass
+                sl = self.qualname_index.get(sym.qualname.lower())
+                if sl:
+                    try:
+                        sl.remove(sym)
+                    except ValueError:
+                        pass
+                self.symbol_definition_paths.get(sym.name.lower(), set()).discard(path)
+                self.symbol_definition_paths.get(sym.qualname.lower(), set()).discard(path)
+            self.python_symbols = [s for s in self.python_symbols if s.path != path]
+            self.test_symbols = [s for s in self.test_symbols if s.path != path]
+            self.symbol_reference_index.pop(path, None)
+
+        # 2. Add/re-index new and modified entries
+        for path in changed_paths:
+            model = new_by_path[path]
+            self.by_path[path] = model
+            for token in _tokenize(f"{model.name} {model.path}"):
+                self.token_index.setdefault(token, set()).add(path)
+            if model.suffix:
+                self.suffix_index.setdefault(model.suffix.lower(), set()).add(path)
+            self.type_index.setdefault(model.entry_type, set()).add(path)
+            if model.mime_type:
+                self.mime_index.setdefault(model.mime_type.lower(), set()).add(path)
+            self._index_content(root_path, model)
+            self._index_python_symbols(root_path, model)
+
+        # 3. Rebuild children_index (cheap — just dicts of lists)
+        self.children_index.clear()
+        for path, model in self.by_path.items():
+            if path == ".":
+                parent = None
+            elif "/" in path:
+                parent = path.rsplit("/", 1)[0]
+            else:
+                parent = "."
+            if parent is not None:
+                self.children_index.setdefault(parent, []).append(path)
+            if model.entry_type == "directory":
+                self.children_index.setdefault(path, [])
+        for child_paths in self.children_index.values():
+            child_paths.sort(key=str.lower)
+
+        # 4. Rebuild BM25 over updated by_path (still O(N) but unavoidable for avgdl)
+        self.bm25_term_frequencies.clear()
+        self.bm25_document_frequencies.clear()
+        self.bm25_document_lengths.clear()
+        self.bm25_doc_norms.clear()
+        self.bm25_inverted_index.clear()
+        self.bm25_ready = False
+        self._build_bm25()
+
+        # 5. Commit new snapshot and invalidate query cache
+        self.snapshot = snapshot
+        self.last_built_at = time.time()
+        self.rebuild_counter += 1
+        self.query_cache.clear()
+
+        stats = self.stats()
+        stats["incremental_changes"] = {
+            "mode": "incremental",
+            "added": len(added_paths),
+            "modified": len(modified_paths),
+            "removed": len(removed_paths),
+        }
+        return stats
+
     def stats(self) -> dict[str, object]:
         if self.snapshot is None:
             return {

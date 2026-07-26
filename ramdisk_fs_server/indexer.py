@@ -74,6 +74,7 @@ class IndexStore:
     text_bytes_indexed: int = 0
     file_text_cache: dict[str, str] = field(default_factory=dict)
     file_lines_cache: dict[str, list[str]] = field(default_factory=dict)
+    file_lines_lower_cache: dict[str, list[str]] = field(default_factory=dict)
     file_signature_cache: dict[str, tuple[int, int, float]] = field(default_factory=dict)
     content_terms_cache: dict[str, list[str]] = field(default_factory=dict)
     python_symbols: list[PythonSymbol] = field(default_factory=list)
@@ -397,6 +398,7 @@ class IndexStore:
             self.cache_root = root_str
             self.file_text_cache.clear()
             self.file_lines_cache.clear()
+            self.file_lines_lower_cache.clear()
             self.file_signature_cache.clear()
             self.content_terms_cache.clear()
             self.python_symbol_cache.clear()
@@ -405,6 +407,7 @@ class IndexStore:
         for cache in (
             self.file_text_cache,
             self.file_lines_cache,
+            self.file_lines_lower_cache,
             self.file_signature_cache,
             self.content_terms_cache,
             self.python_symbol_cache,
@@ -423,6 +426,7 @@ class IndexStore:
             return cached
         if cached_signature != signature:
             self.file_lines_cache.pop(path, None)
+            self.file_lines_lower_cache.pop(path, None)
             self.content_terms_cache.pop(path, None)
             self.python_symbol_cache.pop(path, None)
         if cached is not None:
@@ -442,11 +446,13 @@ class IndexStore:
             return cached
         if cached is not None:
             self.file_lines_cache.pop(path, None)
+            self.file_lines_lower_cache.pop(path, None)
         text = self._read_cached_text(root_path, path, signature)
         if text is None:
             return None
         cached = text.splitlines() or [text]
         self.file_lines_cache[path] = cached
+        self.file_lines_lower_cache[path] = [line.lower() for line in cached]
         return cached
 
     def _get_cached_content_terms(self, root_path: Path, model: FsEntryModel) -> list[str] | None:
@@ -482,6 +488,12 @@ class IndexStore:
         if self.file_signature_cache.get(path) != signature:
             return None
         return self.file_lines_cache.get(path)
+
+    def _peek_cached_lines_lower(self, path: str, signature: tuple[int, int, float]) -> list[str] | None:
+        """Return pre-lowercased lines if available — avoids per-query str.lower() in scoring."""
+        if self.file_signature_cache.get(path) != signature:
+            return None
+        return self.file_lines_lower_cache.get(path)
 
     def search_symbols(
         self,
@@ -852,16 +864,19 @@ class IndexStore:
             lines = text.splitlines() or [text]
         if lines is None:
             return None
+
         best_index = 0
         best_score = -1
         if terms:
-            for index, line in enumerate(lines):
-                lowered = line.lower()
+            # Use pre-lowercased lines when available to avoid str.lower() per-query.
+            lines_lower = self._peek_cached_lines_lower(path, signature)
+            if lines_lower is None:
+                lines_lower = [line.lower() for line in lines]
+            for index, lowered in enumerate(lines_lower):
                 score = 0
                 for term in terms:
-                    c = lowered.count(term)
-                    if c:
-                        score += c
+                    if term in lowered:
+                        score += lowered.count(term)
                 if score > best_score:
                     best_score = score
                     best_index = index
@@ -870,6 +885,7 @@ class IndexStore:
                 if line.strip():
                     best_index = index
                     break
+
         if terms and best_score <= 0:
             if any(term in path.lower() for term in terms):
                 return f"path match: {_highlight_terms(path, terms)}"
@@ -905,16 +921,34 @@ def _highlight_terms(text: str, terms: list[str]) -> str:
 
 @lru_cache(maxsize=1024)
 def _build_highlighter(terms: frozenset[str]) -> Callable[[str], str] | None:
-    """Compile one regex highlighter per unique term-set; result is cached module-wide."""
+    """Case-insensitive highlighter using str.find/slice — faster than re.sub for [a-z0-9] terms."""
     if not terms:
         return None
-    unique_terms = sorted(terms, key=len, reverse=True)
-    patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in unique_terms]
+    # Sort longest first so overlapping terms match correctly.
+    sorted_terms = sorted(terms, key=len, reverse=True)
+    open_tag = "[["
+    close_tag = "]]"
 
     def highlight(text: str) -> str:
-        highlighted = text
-        for pattern in patterns:
-            highlighted = pattern.sub(lambda match: HIGHLIGHT_TEMPLATE.format(term=match.group(0)), highlighted)
-        return highlighted
+        result = text
+        for term in sorted_terms:
+            term_lower = term  # terms from _tokenize_terms are already lowercase
+            tlen = len(term)
+            out: list[str] = []
+            lo = result.lower()
+            pos = 0
+            while True:
+                idx = lo.find(term_lower, pos)
+                if idx == -1:
+                    out.append(result[pos:])
+                    break
+                out.append(result[pos:idx])
+                out.append(open_tag)
+                out.append(result[idx: idx + tlen])
+                out.append(close_tag)
+                pos = idx + tlen
+                lo = lo  # reuse, positions stay valid
+            result = "".join(out)
+        return result
 
     return highlight

@@ -41,7 +41,28 @@ class FsEntryModel:
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "path": self.path,
+            "name": self.name,
+            "entry_type": self.entry_type,
+            "size_bytes": self.size_bytes,
+            "mode": self.mode,
+            "permissions": self.permissions,
+            "uid": self.uid,
+            "gid": self.gid,
+            "inode": self.inode,
+            "device": self.device,
+            "hard_links": self.hard_links,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "accessed_at": self.accessed_at,
+            "suffix": self.suffix,
+            "mime_type": self.mime_type,
+            "is_symlink": self.is_symlink,
+            "symlink_target": self.symlink_target,
+            "children_count": self.children_count,
+            "error": self.error,
+        }
 
 
 @dataclass(slots=True)

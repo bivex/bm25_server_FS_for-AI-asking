@@ -602,6 +602,9 @@ class IndexStore:
                 except (OSError, UnicodeDecodeError):
                     return None
             lines = text.splitlines() or [text]
+            # Populate both caches so future calls (and get_excerpt) get warm hits.
+            self.file_lines_cache[symbol.path] = lines
+            self.file_lines_lower_cache[symbol.path] = [line.lower() for line in lines]
         if lines is None:
             return None
         start = max(symbol.line - 1, 0)

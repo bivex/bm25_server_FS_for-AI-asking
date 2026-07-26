@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import math
 import re
 import time
@@ -87,10 +88,14 @@ class IndexStore:
     bm25_document_lengths: dict[str, int] = field(default_factory=dict)
     bm25_doc_norms: dict[str, float] = field(default_factory=dict)
     bm25_inverted_index: dict[str, dict[str, int]] = field(default_factory=dict)
+    query_cache: dict[tuple[str, str, str | None, str | None, str | None, int], list[tuple[FsEntryModel, float]]] = field(default_factory=dict)
+    rebuild_counter: int = 0
     bm25_average_document_length: float = 0.0
     bm25_ready: bool = False
 
     def clear(self, *, preserve_file_caches: bool = False) -> None:
+        self.rebuild_counter += 1
+        self.query_cache.clear()
         self.snapshot = None
         self.last_built_at = None
         self.by_path.clear()
@@ -478,6 +483,8 @@ class IndexStore:
         )
         return [model for model, _ in ranked]
 
+    _QUERY_CACHE_MAX = 256
+
     def search_with_scores(
         self,
         query: str = "",
@@ -488,6 +495,11 @@ class IndexStore:
         path_prefix: str | None = None,
         limit: int = 50,
     ) -> list[tuple[FsEntryModel, float]]:
+        cache_key = (query, content_query, entry_type, suffix, path_prefix, limit, self.rebuild_counter)
+        cached = self.query_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         candidates = set(self.by_path)
         bm25_tokens: list[str] = []
         normalized_query = query.strip().lower()
@@ -527,9 +539,22 @@ class IndexStore:
             prefix = "." if path_prefix in {"", "."} else path_prefix.strip("/")
             candidates = {path for path in candidates if path == prefix or path.startswith(f"{prefix}/")}
 
-        scored = [(path, self._bm25_score(path, bm25_tokens, query_idfs=self._precompute_query_idfs(bm25_tokens))) for path in candidates]
-        scored.sort(key=lambda item: (-item[1], item[0].lower()))
-        return [(self.by_path[path], score) for path, score in scored[: max(limit, 0)]]
+        safe_limit = max(limit, 0)
+        query_idfs = self._precompute_query_idfs(bm25_tokens)
+        scored_pairs = [(path, self._bm25_score(path, bm25_tokens, query_idfs=query_idfs)) for path in candidates]
+
+        if safe_limit > 0 and len(scored_pairs) > safe_limit:
+            top = heapq.nlargest(safe_limit, scored_pairs, key=lambda item: (item[1], item[0].lower()))
+            top.sort(key=lambda item: (-item[1], item[0].lower()))
+        else:
+            top = sorted(scored_pairs, key=lambda item: (-item[1], item[0].lower()))[:safe_limit]
+
+        result = [(self.by_path[path], score) for path, score in top]
+
+        if len(self.query_cache) >= self._QUERY_CACHE_MAX:
+            self.query_cache.pop(next(iter(self.query_cache)))
+        self.query_cache[cache_key] = result
+        return result
 
     def _precompute_query_idfs(self, query_terms: list[str]) -> dict[str, float]:
         if not self.bm25_ready or not query_terms:

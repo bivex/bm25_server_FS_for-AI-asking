@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from .fs_tree import build_snapshot
@@ -460,6 +461,9 @@ class IndexStore:
             return None
         cached = _tokenize_terms(text)
         self.content_terms_cache[model.path] = cached
+        # LRU cap: drop the oldest entry when cache exceeds limit
+        if len(self.content_terms_cache) > self._CONTENT_TERMS_CACHE_MAX:
+            self.content_terms_cache.pop(next(iter(self.content_terms_cache)))
         return cached
 
     def _warm_line_cache(self) -> None:
@@ -591,7 +595,7 @@ class IndexStore:
         start = max(symbol.line - 1, 0)
         end = min(len(lines), max(symbol.end_line, symbol.line) + max_lines - 1)
         query_terms = _tokenize_terms(query)
-        highlighter = _build_highlighter(query_terms)
+        highlighter = _build_highlighter(frozenset(query_terms))
         excerpt_lines: list[str] = []
         for index in range(start, end):
             snippet = lines[index].rstrip()
@@ -623,6 +627,7 @@ class IndexStore:
         return [model for model, _ in ranked]
 
     _QUERY_CACHE_MAX = 256
+    _CONTENT_TERMS_CACHE_MAX = 2048
 
     def search_with_scores(
         self,
@@ -870,7 +875,7 @@ class IndexStore:
                 return f"path match: {_highlight_terms(path, terms)}"
         start = max(0, best_index - 1)
         end = min(len(lines), best_index + 2)
-        highlighter = _build_highlighter(terms)
+        highlighter = _build_highlighter(frozenset(terms))
         excerpt_lines: list[str] = []
         for index in range(start, end):
             snippet = lines[index].strip()
@@ -894,14 +899,16 @@ class IndexStore:
 
 
 def _highlight_terms(text: str, terms: list[str]) -> str:
-    highlighter = _build_highlighter(terms)
+    highlighter = _build_highlighter(frozenset(t for t in terms if t))
     return text if highlighter is None else highlighter(text)
 
 
-def _build_highlighter(terms: list[str]) -> Callable[[str], str] | None:
-    unique_terms = sorted({term for term in terms if term}, key=len, reverse=True)
-    if not unique_terms:
+@lru_cache(maxsize=1024)
+def _build_highlighter(terms: frozenset[str]) -> Callable[[str], str] | None:
+    """Compile one regex highlighter per unique term-set; result is cached module-wide."""
+    if not terms:
         return None
+    unique_terms = sorted(terms, key=len, reverse=True)
     patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in unique_terms]
 
     def highlight(text: str) -> str:

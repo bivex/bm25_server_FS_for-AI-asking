@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from .indexer import IndexStore
@@ -151,12 +152,11 @@ class AskQuery:
         return asdict(self)
 
 
-def parse_question(question: str, index_store: IndexStore | None = None) -> AskQuery:
-    normalized = question.strip()
+@lru_cache(maxsize=512)
+def _parse_question_cached(normalized: str, path_prefix: str | None) -> AskQuery:
+    """Pure, cache-friendly core of parse_question (no index_store dependency)."""
     lowered = normalized.lower()
     words = WORD_RE.findall(lowered)
-    if not words:
-        raise ValueError("question must not be empty")
 
     entry_type = None
     if any(word in FILE_WORDS for word in words):
@@ -175,7 +175,6 @@ def parse_question(question: str, index_store: IndexStore | None = None) -> AskQ
     content_mode = any(word in CONTENT_WORDS for word in words) or "по содержим" in lowered
     wants_location = any(word in LOCATION_WORDS for word in words)
     wants_list = any(word in LIST_WORDS for word in words)
-    path_prefix = _infer_path_prefix(lowered, index_store)
     path_prefix_tokens = set(WORD_RE.findall(path_prefix.lower())) if path_prefix else set()
     subject = _infer_subject(normalized, path_prefix)
 
@@ -222,6 +221,16 @@ def parse_question(question: str, index_store: IndexStore | None = None) -> AskQ
         wants_location=wants_location,
         wants_list=wants_list,
     )
+
+
+def parse_question(question: str, index_store: IndexStore | None = None) -> AskQuery:
+    normalized = question.strip()
+    if not WORD_RE.search(normalized):
+        raise ValueError("question must not be empty")
+    # _infer_path_prefix needs the live index — resolve it first, then delegate
+    # to the cached pure function so repeated identical questions are free.
+    path_prefix = _infer_path_prefix(normalized.lower(), index_store)
+    return _parse_question_cached(normalized, path_prefix)
 
 
 def answer_question(question: str, index_store: IndexStore) -> dict[str, object]:

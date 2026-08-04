@@ -1,8 +1,17 @@
 [project]
-name = "sqlfs-ramdisk-server"
+name = "bm25-skeleton-mcp"
 version = "0.1.0"
-description = "macOS RAM disk HTTP server that exposes filesystem models and tree snapshots"
+description = "2-Tier Codebase Representation, Skeleton DSL & BM25 Search MCP Server"
 requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "ast-grep-cli>=0.40.0",
+    "ast-grep-py>=0.40.0",
+    "tree-sitter>=0.25.0",
+]
+
+[project.scripts]
+bm25-skeleton-mcp = "ramdisk_fs_mcp.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]

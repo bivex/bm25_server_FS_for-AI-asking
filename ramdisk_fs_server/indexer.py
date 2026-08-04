@@ -88,6 +88,10 @@ class IndexStore:
     qualname_index: dict[str, list[PythonSymbol]] = field(default_factory=dict)
     symbol_definition_paths: dict[str, set[str]] = field(default_factory=dict)
     symbol_reference_index: dict[str, Counter[str]] = field(default_factory=dict)
+    # ── O(1) skeleton DSL cache ──────────────────────────────────────────────
+    skeleton_dsl_cache: dict[str, str] = field(default_factory=dict)  # path → rendered DSL
+    # ── BM25 rebuild guard ───────────────────────────────────────────────────
+    _bm25_built_key: str = field(default="")  # root+rebuild_counter; skip rebuild if unchanged
     test_symbols: list[PythonSymbol] = field(default_factory=list)
     python_symbol_cache: dict[str, tuple[tuple[int, int, float], list[PythonSymbol], Counter[str]]] = field(default_factory=dict)
     bm25_term_frequencies: dict[str, Counter[str]] = field(default_factory=dict)
@@ -121,6 +125,8 @@ class IndexStore:
         self.symbols_by_path.clear()
         self.symbol_index.clear()
         self.symbol_prefix_index.clear()
+        self.skeleton_dsl_cache.clear()
+        self._bm25_built_key = ""
         self.qualname_index.clear()
         self.symbol_definition_paths.clear()
         self.symbol_reference_index.clear()
@@ -382,7 +388,13 @@ class IndexStore:
     def get_skeleton_dsl(self, path: str) -> str:
         """Render a file's skeleton DSL with cross-references for AI context."""
         normalized = self.normalize_path(path)
-        return render_file_skeleton_dsl(normalized, self)
+        # O(1) cache — skeleton is deterministic for a given index rebuild
+        cached = self.skeleton_dsl_cache.get(normalized)
+        if cached is not None:
+            return cached
+        result = render_file_skeleton_dsl(normalized, self)
+        self.skeleton_dsl_cache[normalized] = result
+        return result
 
     def get_contour_skeleton_dsl(self, query: str, limit: int = 10) -> str:
         """Render a search query's matching symbol contour in skeleton DSL format."""
@@ -844,7 +856,12 @@ class IndexStore:
             if symbol.is_test:
                 self.test_symbols.append(symbol)
         for reference_name, count in references.items():
-            self.symbol_reference_index.setdefault(reference_name, Counter())[model.path] = count
+            # FIX: reuse existing Counter instead of creating a new one per reference
+            ref_entry = self.symbol_reference_index.get(reference_name)
+            if ref_entry is None:
+                ref_entry = Counter()
+                self.symbol_reference_index[reference_name] = ref_entry
+            ref_entry[model.path] = count
 
     def _should_index_content(self, model: FsEntryModel) -> bool:
         if model.entry_type != "file":
@@ -862,6 +879,10 @@ class IndexStore:
         }
 
     def _build_bm25(self) -> None:
+        # Guard: skip rebuild if already built for this exact root + rebuild_counter
+        current_key = f"{getattr(self.snapshot, 'summary', None) and self.snapshot.summary.root}:{self.rebuild_counter}"
+        if self._bm25_built_key == current_key and self.bm25_ready:
+            return
         total_length = 0
         root_path = Path(self.snapshot.summary.root) if self.snapshot is not None else None
         for path, model in self.by_path.items():
@@ -884,6 +905,7 @@ class IndexStore:
                 self.bm25_doc_norms[path] = BM25_K1 * (1 - BM25_B + BM25_B * (doc_length / self.bm25_average_document_length))
                 for token, freq in term_freq.items():
                     self.bm25_inverted_index.setdefault(token, {})[path] = freq
+            self._bm25_built_key = current_key  # mark as done
 
     def _document_terms(self, model: FsEntryModel, *, root_path: Path | None = None) -> list[str]:
         terms: list[str] = []

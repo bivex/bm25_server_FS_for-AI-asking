@@ -22,29 +22,41 @@ def resolve_symbol_ref(ref_name: str, index_store: IndexStore | None) -> str:
     return ref_name
 
 
+_USED_BY_CACHE: dict[int, tuple[int, dict[str, list[str]]]] = {}
+
+
 def find_used_by(symbol: PythonSymbol, index_store: IndexStore | None) -> list[str]:
     """Find callers across the codebase that reference/call this symbol."""
     if index_store is None:
         return []
 
-    target_name = symbol.name
-    target_qualname = symbol.qualname
-    used_by: list[str] = []
-    seen: set[tuple[str, int]] = set()
+    store_id = id(index_store)
+    rebuild_cnt = getattr(index_store, "rebuild_counter", 0)
 
-    for s in index_store.python_symbols:
-        if s.path == symbol.path and s.line == symbol.line:
-            continue
-        for call_target in s.calls:
-            call_short = call_target.split(".")[-1]
-            if call_target in (target_name, target_qualname) or call_short == target_name:
-                key = (s.path, s.line)
-                if key not in seen:
-                    seen.add(key)
-                    used_by.append(f"{s.qualname} ({s.path}:L{s.line})")
-                break
+    cached_entry = _USED_BY_CACHE.get(store_id)
+    if cached_entry is None or cached_entry[0] != rebuild_cnt:
+        used_by_map: dict[str, list[str]] = {}
+        seen_map: dict[str, set[tuple[str, int]]] = {}
+        for s in index_store.python_symbols:
+            for call_target in getattr(s, "calls", []):
+                call_short = call_target.split(".")[-1]
+                for target_key in (call_target, call_short):
+                    if target_key not in seen_map:
+                        seen_map[target_key] = set()
+                        used_by_map[target_key] = []
+                    key = (s.path, s.line)
+                    if key not in seen_map[target_key]:
+                        seen_map[target_key].add(key)
+                        used_by_map[target_key].append(f"{s.qualname} ({s.path}:L{s.line})")
+        _USED_BY_CACHE[store_id] = (rebuild_cnt, used_by_map)
+        used_by_map_active = used_by_map
+    else:
+        used_by_map_active = cached_entry[1]
 
-    return used_by
+    candidates = used_by_map_active.get(symbol.qualname) or used_by_map_active.get(symbol.name) or []
+    # Exclude self-references
+    self_ref = f"({symbol.path}:L{symbol.line})"
+    return [c for c in candidates if self_ref not in c]
 
 
 def render_symbol_dsl(

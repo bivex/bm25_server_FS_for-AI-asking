@@ -32,33 +32,15 @@ def _extract_calls(node: ast.AST) -> list[str]:
     calls: list[str] = []
     seen: set[str] = set()
 
-    class _CallVisitor(ast.NodeVisitor):
-        def visit_Call(self, call_node: ast.Call) -> None:  # noqa: N802
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
             try:
-                target = ast.unparse(call_node.func).strip()
+                target = ast.unparse(child.func).strip()
                 if target and target not in seen:
                     seen.add(target)
                     calls.append(target)
             except Exception:
                 pass
-            self.generic_visit(call_node)
-
-        def visit_FunctionDef(self, n: ast.FunctionDef) -> None:  # noqa: N802
-            if n is not node:
-                return
-            self.generic_visit(n)
-
-        def visit_AsyncFunctionDef(self, n: ast.AsyncFunctionDef) -> None:  # noqa: N802
-            if n is not node:
-                return
-            self.generic_visit(n)
-
-        def visit_ClassDef(self, n: ast.ClassDef) -> None:  # noqa: N802
-            if n is not node:
-                return
-            self.generic_visit(n)
-
-    _CallVisitor().visit(node)
     return calls
 
 
@@ -98,7 +80,6 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                     end_line=getattr(node, "end_lineno", node.lineno),
                 )
             )
-        self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         for alias in node.names:
@@ -114,17 +95,14 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                     end_line=getattr(node, "end_lineno", node.lineno),
                 )
             )
-        self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
         if isinstance(node.ctx, ast.Load):
             self.references[node.id.lower()] += 1
-        self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         if isinstance(node.ctx, ast.Load):
             self.references[node.attr.lower()] += 1
-        self.generic_visit(node)
 
     def _record_symbol(self, node: ast.AST, name: str, kind: str) -> None:
         scope_names = [scope_name for scope_name, _ in self._scope_stack]

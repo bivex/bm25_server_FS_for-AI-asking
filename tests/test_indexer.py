@@ -96,7 +96,7 @@ class IndexStoreTests(unittest.TestCase):
             store = IndexStore()
             stats = store.rebuild(root)
 
-            self.assertEqual(stats["ignored_names"], [".git", ".venv", "__pycache__", "node_modules"])
+            self.assertEqual(stats["ignored_names"], [".git", ".venv", "__pycache__", "node_modules", "scratch"])
             self.assertIn("README.md", store.by_path)
             self.assertNotIn("__pycache__", store.by_path)
             self.assertNotIn(".git", store.by_path)

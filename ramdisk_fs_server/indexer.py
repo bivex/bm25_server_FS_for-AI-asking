@@ -45,7 +45,7 @@ TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
-DEFAULT_IGNORED_NAMES = frozenset({"__pycache__", ".git", "node_modules", ".venv"})
+DEFAULT_IGNORED_NAMES = frozenset({"__pycache__", ".git", "node_modules", ".venv", "scratch"})
 MAX_TEXT_FILE_SIZE = 1024 * 1024
 BM25_K1 = 1.5
 BM25_B = 0.75

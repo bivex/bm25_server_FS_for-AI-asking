@@ -21,6 +21,13 @@ class IndexStoreAdapter(IndexPort):
     def store(self) -> IndexStore:
         return self._store
 
+    def ensure_root(self, root_path: str | Path | None) -> None:
+        """Dynamically switch and index any target codebase directory (e.g. /tmp/project)."""
+        if root_path is not None:
+            p = Path(root_path).expanduser().resolve()
+            if self._store.cache_root != str(p):
+                self.rebuild(p)
+
     def rebuild(self, root: Path) -> dict[str, Any]:
         cache_file = root / ".ramdisk_cache.pkl"
         if cache_file.exists() and self._store.snapshot is None:

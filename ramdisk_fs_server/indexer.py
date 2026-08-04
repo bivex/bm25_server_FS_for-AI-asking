@@ -18,7 +18,14 @@ from .scip_integration import SCIPGraph, build_scip_index, is_scip_available, lo
 from .skeleton_dsl import render_contour_skeleton_dsl, render_file_skeleton_dsl
 from .symbol_extractor import C_EXTENSIONS, OTHER_EXTENSIONS, PYTHON_EXTENSIONS, extract_code_symbols
 
-TOKEN_RE = re.compile(r"[a-z0-9]+")
+# ── Legacy regex kept for backward compat (used internally below) ────────────
+_TOKEN_RE_LEGACY = re.compile(r"[a-z0-9]+")
+# ── CamelCase / PascalCase splitter ─────────────────────────────────────────
+# Matches: sequences of uppercase+lowercase, all-caps acronyms, lowercase runs
+_CAMEL_RE = re.compile(r"[A-Z][a-z0-9]+|[A-Z]{2,}(?=[A-Z][a-z]|[0-9]|$)|[a-z][a-z0-9]*|[0-9]+")
+# ── Identifier boundary splitter (handles snake_case, kebab-case, dots) ──────
+_IDENT_SPLIT_RE = re.compile(r"[^a-zA-Z0-9]+")
+
 TEXT_SUFFIXES = {
     ".c",
     ".cfg",
@@ -51,13 +58,110 @@ BM25_K1 = 1.5
 BM25_B = 0.75
 HIGHLIGHT_TEMPLATE = "[[{term}]]"
 
+# ── Field-weight constants for BM25 document construction ────────────────────
+# Higher weight = term repeated N times → higher TF → higher BM25 score
+_W_SYMBOL   = 8   # AST symbol name (function/class/method) — most important
+_W_FILENAME = 4   # filename (without extension)
+_W_PATH     = 2   # parent directory path segments
+_W_CONTENT  = 1   # file body content (baseline)
+
+# ── Code-aware stop words (applied to INDEX documents only, NOT to queries) ──
+# These tokens appear in virtually every source file and add noise to IDF.
+CODE_STOP_WORDS: frozenset[str] = frozenset({
+    # Python keywords
+    "def", "class", "return", "import", "from", "self", "none",
+    "true", "false", "if", "else", "elif", "for", "while",
+    "try", "except", "with", "as", "in", "pass", "raise",
+    "yield", "lambda", "global", "nonlocal", "del", "assert",
+    # JavaScript / TypeScript
+    "const", "let", "var", "function", "export", "default",
+    "async", "await", "typeof", "instanceof", "prototype",
+    # Rust
+    "fn", "mut", "pub", "use", "mod", "impl", "match", "where",
+    "trait", "derive", "unsafe", "move", "ref", "dyn",
+    # Go
+    "func", "package", "type", "interface", "chan", "defer", "go",
+    # C / C++
+    "void", "char", "static", "extern", "inline", "typedef",
+    "unsigned", "signed", "long", "short", "struct", "enum",
+    # Java / Kotlin
+    "public", "private", "protected", "final", "abstract", "override",
+    "extends", "implements", "super", "throws",
+    # Generic noise (ultra-common identifiers with near-zero discrimination)
+    "null", "nil", "undefined", "this", "that",
+    # Single chars are already filtered by len ≥ 2 below
+})
+
+
+def _split_identifier(token: str) -> list[str]:
+    """Split a camelCase/PascalCase/snake_case/SCREAMING_SNAKE token into parts.
+
+    Returns the original lowercased token PLUS all its sub-parts, so that
+    both exact and partial queries match.
+
+    Examples:
+        getUserAccount  → [getuseraccount, get, user, account]
+        RateLimiter     → [ratelimiter, rate, limiter]
+        HTTP_STATUS_CODE→ [http_status_code, http, status, code]
+        parse_JSON_resp → [parse_json_resp, parse, json, resp]
+    """
+    lower = token.lower()
+    result = [lower]  # always include the original lowercased form
+    # Step 1: split on non-alphanumeric boundaries (snake_case, kebab, dots)
+    boundary_parts = _IDENT_SPLIT_RE.split(token)
+    for part in boundary_parts:
+        if not part:
+            continue
+        # Step 2: CamelCase / PascalCase split within each boundary segment
+        camel_parts = _CAMEL_RE.findall(part)
+        for p in camel_parts:
+            pl = p.lower()
+            if pl and pl != lower and len(pl) >= 2:
+                result.append(pl)
+    return result
+
+
 
 def _tokenize(value: str) -> set[str]:
-    return set(TOKEN_RE.findall(value.lower()))
+    """Tokenize a string into a set of lowercase tokens with CamelCase splitting.
+
+    Used for boolean candidate filtering (token_index, content_index).
+    """
+    tokens: set[str] = set()
+    for raw_token in _IDENT_SPLIT_RE.split(value):
+        if not raw_token:
+            continue
+        tokens.update(_split_identifier(raw_token))
+    tokens.discard("")
+    return tokens
 
 
 def _tokenize_terms(value: str) -> list[str]:
-    return TOKEN_RE.findall(value.lower())
+    """Tokenize into an ordered list with CamelCase expansion.
+
+    Used for BM25 query term lists and excerpt highlighting.
+    NOTE: Does NOT apply stop-word filtering — callers that build the
+    document index should call _tokenize_terms_for_index() instead.
+    """
+    result: list[str] = []
+    for raw_token in _IDENT_SPLIT_RE.split(value):
+        if not raw_token:
+            continue
+        result.extend(_split_identifier(raw_token))
+    return result
+
+
+def _tokenize_terms_for_index(value: str) -> list[str]:
+    """Like _tokenize_terms but with CODE_STOP_WORDS filtered out.
+
+    Apply ONLY when building BM25 document vectors, never to query terms.
+    Filtering stop words from documents improves IDF discrimination without
+    breaking queries that explicitly search for 'self', 'def', etc.
+    """
+    return [
+        t for t in _tokenize_terms(value)
+        if t not in CODE_STOP_WORDS and len(t) >= 2
+    ]
 
 
 @dataclass(slots=True)
@@ -908,15 +1012,78 @@ class IndexStore:
             self._bm25_built_key = current_key  # mark as done
 
     def _document_terms(self, model: FsEntryModel, *, root_path: Path | None = None) -> list[str]:
+        """Build the weighted term list used by BM25 for this document.
+
+        Field weights (repeated token copies simulate higher TF):
+          _W_SYMBOL=8  — AST symbol names (functions, classes, methods)
+          _W_FILENAME=4 — stem of the filename
+          _W_PATH=2    — parent directory path segments
+          _W_CONTENT=1 — raw file body tokens (stop-word filtered)
+        """
         terms: list[str] = []
-        metadata_terms = _tokenize_terms(f"{model.name} {model.path}")
-        terms.extend(metadata_terms)
-        terms.extend(metadata_terms)
+
+        # 1. Filename tokens — high weight (4x)
+        name_stem = model.name.rsplit(".", 1)[0] if "." in model.name else model.name
+        for t in _tokenize_terms_for_index(name_stem):
+            terms.extend([t] * _W_FILENAME)
+
+        # 2. Parent directory path segments — medium weight (2x)
+        path_parts = model.path.replace("\\", "/").split("/")
+        for segment in path_parts[:-1]:  # skip the filename itself
+            for t in _tokenize_terms_for_index(segment):
+                terms.extend([t] * _W_PATH)
+
+        # 3. AST symbols for this file — highest weight (8x)
+        #    This is the key enrichment: function/class names are the most
+        #    discriminative signal and were previously absent from BM25.
+        for sym in self.symbols_by_path.get(model.path, []):
+            sym_name_terms = _tokenize_terms_for_index(sym.name)
+            for t in sym_name_terms:
+                terms.extend([t] * _W_SYMBOL)
+            # qualname (e.g. ClassName.method_name) at half symbol weight
+            if sym.qualname and sym.qualname != sym.name:
+                for t in _tokenize_terms_for_index(sym.qualname):
+                    terms.extend([t] * (_W_SYMBOL // 2))
+
+        # 4. File body content — baseline weight (1x), stop-word filtered
         if model.path in self.content_indexed_paths and root_path is not None:
             content_terms = self._get_cached_content_terms(root_path, model)
             if content_terms is not None:
-                terms.extend(content_terms)
+                # content_terms already tokenized; apply stop-word filter here
+                terms.extend(
+                    t for t in content_terms
+                    if t not in CODE_STOP_WORDS and len(t) >= 2
+                )
+
         return terms
+
+    def _proximity_boost(self, path: str, query_terms: list[str]) -> float:
+        """Extra score when multiple query terms co-occur on the same line.
+
+        Motivation: a file where 'rate' and 'limit' appear on the same line
+        is more relevant to a 'rate limit' query than one where both words
+        exist but are 500 lines apart.
+
+        The boost is capped to avoid drowning the base BM25 signal.
+        """
+        if len(query_terms) < 2:
+            return 0.0
+        model = self.by_path.get(path)
+        if model is None:
+            return 0.0
+        sig = self._model_signature(model)
+        lines_lower = self._peek_cached_lines_lower(path, sig)
+        if not lines_lower:
+            return 0.0
+        unique_terms = list(dict.fromkeys(query_terms))  # deduplicated
+        boost = 0.0
+        for line in lines_lower:
+            hits = sum(1 for t in unique_terms if t in line)
+            if hits >= len(unique_terms):      # ALL terms on one line
+                boost += 3.0
+            elif hits >= 2:                    # at least 2 terms together
+                boost += 0.4 * hits
+        return min(boost, 5.0)  # hard cap
 
     def _bm25_score(self, path: str, query_terms: list[str], query_idfs: dict[str, float] | None = None) -> float:
         if not self.bm25_ready or not query_terms:
@@ -943,9 +1110,29 @@ class IndexStore:
                 denominator = doc_frequency + 0.5
                 idf = math.log(1 + (numerator / denominator))
             score += idf * ((frequency * (BM25_K1 + 1)) / (frequency + norm))
+        # Proximity boost: reward co-occurrence of multiple terms on same line
+        # Damped by 0.25 to avoid overriding base BM25 ordering.
+        if len(query_terms) >= 2:
+            score += self._proximity_boost(path, query_terms) * 0.25
         return score
 
-    def get_excerpt(self, path: str, query: str, *, max_chars: int = 220) -> str | None:
+    def get_excerpt(
+        self,
+        path: str,
+        query: str,
+        *,
+        max_chars: int = 220,
+        context_lines: int = 3,
+        max_clusters: int = 2,
+    ) -> str | None:
+        """Return a rich code excerpt centred on the best query matches.
+
+        Improvements over the original:
+        - context_lines=3 → 7-line windows instead of 3-line windows
+        - Returns up to max_clusters=2 separate match clusters, separated by
+          a '---' divider, so callers see multiple relevant code sections.
+        - Line scores based on multi-term count per line (most hits = best).
+        """
         if self.snapshot is None or path not in self.content_indexed_paths:
             return None
         model = self.by_path.get(path)
@@ -965,56 +1152,75 @@ class IndexStore:
         lines = self._peek_cached_lines(path, signature)
         if lines is None:
             lines = text.splitlines() or [text]
-        if lines is None:
-            return None
 
-        best_index = 0
-        best_score = -1
-        if terms:
-            # Use pre-lowercased lines when available to avoid str.lower() per-query.
-            lines_lower = self._peek_cached_lines_lower(path, signature)
-            if lines_lower is None:
-                lines_lower = [line.lower() for line in lines]
-            for index, lowered in enumerate(lines_lower):
-                score = 0
-                for term in terms:
-                    if term in lowered:
-                        score += lowered.count(term)
-                if score > best_score:
-                    best_score = score
-                    best_index = index
-        else:
+        if not terms:
+            # No query terms: return the first non-empty line
             for index, line in enumerate(lines):
                 if line.strip():
-                    best_index = index
-                    break
+                    return f"line {index + 1}: {line.strip()[:max_chars]}"
+            return None
 
-        if terms and best_score <= 0:
-            if any(term in path.lower() for term in terms):
+        lines_lower = self._peek_cached_lines_lower(path, signature)
+        if lines_lower is None:
+            lines_lower = [line.lower() for line in lines]
+
+        # Score every line by how many query terms appear in it
+        line_scores: list[tuple[int, int]] = []  # (score, line_index)
+        for idx, lowered in enumerate(lines_lower):
+            sc = sum(lowered.count(t) for t in terms if t in lowered)
+            if sc > 0:
+                line_scores.append((sc, idx))
+
+        if not line_scores:
+            # No hits in content — try path match
+            if any(t in path.lower() for t in terms):
                 return f"path match: {_highlight_terms(path, terms)}"
-        start = max(0, best_index - 1)
-        end = min(len(lines), best_index + 2)
-        highlighter = _build_highlighter(frozenset(terms))
-        excerpt_lines: list[str] = []
-        for index in range(start, end):
-            snippet = lines[index].strip()
+            snippet = next((ln.strip() for ln in lines if ln.strip()), "")
             if not snippet:
+                return None
+            return f"line 1: {snippet[:max_chars]}"
+
+        # Sort by score descending, then group into clusters by line proximity
+        line_scores.sort(key=lambda x: -x[0])
+        selected_centers: list[int] = []
+        used: set[int] = set()
+        for _, idx in line_scores:
+            # Skip if this line is already covered by a previously selected cluster
+            if any(abs(idx - c) <= context_lines * 2 for c in selected_centers):
                 continue
-            if highlighter is not None:
-                snippet = highlighter(snippet)
-            if len(snippet) > max_chars:
-                snippet = snippet[: max_chars - 1] + "…"
-            excerpt_lines.append(f"line {index + 1}: {snippet}")
-        if excerpt_lines:
-            return "\n".join(excerpt_lines)
-        if terms and any(term in path.lower() for term in terms):
+            selected_centers.append(idx)
+            used.add(idx)
+            if len(selected_centers) >= max_clusters:
+                break
+        selected_centers.sort()  # restore document order
+
+        highlighter = _build_highlighter(frozenset(terms))
+        cluster_texts: list[str] = []
+        for center in selected_centers:
+            start = max(0, center - context_lines)
+            end = min(len(lines), center + context_lines + 1)
+            cluster_lines: list[str] = []
+            for idx in range(start, end):
+                snippet = lines[idx].strip()
+                if not snippet:
+                    continue
+                if highlighter is not None:
+                    snippet = highlighter(snippet)
+                if len(snippet) > max_chars:
+                    snippet = snippet[: max_chars - 1] + "…"
+                marker = "► " if idx == center else "  "
+                cluster_lines.append(f"{marker}line {idx + 1}: {snippet}")
+            if cluster_lines:
+                cluster_texts.append("\n".join(cluster_lines))
+
+        if cluster_texts:
+            return "\n--- (next match) ---\n".join(cluster_texts)
+        if any(t in path.lower() for t in terms):
             return f"path match: {_highlight_terms(path, terms)}"
-        snippet = next((line.strip() for line in lines if line.strip()), "")
+        snippet = next((ln.strip() for ln in lines if ln.strip()), "")
         if not snippet:
             return None
-        if len(snippet) > max_chars:
-            snippet = snippet[: max_chars - 1] + "…"
-        return f"line 1: {snippet}"
+        return f"line 1: {snippet[:max_chars]}"
 
 
 def _highlight_terms(text: str, terms: list[str]) -> str:

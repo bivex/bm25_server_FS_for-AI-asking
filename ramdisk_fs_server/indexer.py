@@ -84,6 +84,7 @@ class IndexStore:
     python_symbols: list[PythonSymbol] = field(default_factory=list)
     symbols_by_path: dict[str, list[PythonSymbol]] = field(default_factory=dict)
     symbol_index: dict[str, list[PythonSymbol]] = field(default_factory=dict)
+    symbol_prefix_index: dict[str, list[PythonSymbol]] = field(default_factory=dict)  # 3-char prefix → symbols
     qualname_index: dict[str, list[PythonSymbol]] = field(default_factory=dict)
     symbol_definition_paths: dict[str, set[str]] = field(default_factory=dict)
     symbol_reference_index: dict[str, Counter[str]] = field(default_factory=dict)
@@ -119,6 +120,7 @@ class IndexStore:
         self.python_symbols.clear()
         self.symbols_by_path.clear()
         self.symbol_index.clear()
+        self.symbol_prefix_index.clear()
         self.qualname_index.clear()
         self.symbol_definition_paths.clear()
         self.symbol_reference_index.clear()
@@ -568,11 +570,19 @@ class IndexStore:
             candidates = list(self.python_symbols)
         else:
             candidates = [*self.symbol_index.get(normalized, []), *self.qualname_index.get(normalized, [])]
-            if not candidates:
+            if not candidates and len(normalized) >= 3:
+                # FIX: O(1) prefix lookup instead of O(N) linear scan over all symbols
+                pfx = normalized[:3]
+                prefix_candidates = self.symbol_prefix_index.get(pfx, [])
                 candidates = [
-                    symbol
-                    for symbol in self.python_symbols
-                    if normalized in symbol.name.lower() or normalized in symbol.qualname.lower()
+                    sym for sym in prefix_candidates
+                    if normalized in sym.name.lower() or normalized in sym.qualname.lower()
+                ]
+            elif not candidates:
+                # Short query (<3 chars): still need linear scan, but rare in practice
+                candidates = [
+                    sym for sym in self.python_symbols
+                    if normalized in sym.name.lower()
                 ]
         deduped: dict[tuple[str, str, int], PythonSymbol] = {}
         for symbol in candidates:
@@ -823,6 +833,11 @@ class IndexStore:
         for symbol in symbols:
             self.symbol_index.setdefault(symbol.name.lower(), []).append(symbol)
             self.qualname_index.setdefault(symbol.qualname.lower(), []).append(symbol)
+            # Build prefix index for O(1) substring lookup (replaces O(N) linear scan fallback)
+            _nm_lower = symbol.name.lower()
+            for _start in range(len(_nm_lower) - 2):  # all 3+ char prefixes
+                _pfx = _nm_lower[_start:_start + 3]
+                self.symbol_prefix_index.setdefault(_pfx, []).append(symbol)
             if symbol.kind in {"class", "function", "method", "struct", "enum", "union", "macro"}:
                 self.symbol_definition_paths.setdefault(symbol.name.lower(), set()).add(symbol.path)
                 self.symbol_definition_paths.setdefault(symbol.qualname.lower(), set()).add(symbol.path)

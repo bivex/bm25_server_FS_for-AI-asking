@@ -136,6 +136,7 @@ class PythonSymbol:
     inherits: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     signature: str | None = None
+    language: str = "python"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -151,4 +152,8 @@ class PythonSymbol:
             "inherits": self.inherits,
             "calls": self.calls,
             "signature": self.signature,
+            "language": self.language,
         }
+
+
+CodeSymbol = PythonSymbol

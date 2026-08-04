@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ramdisk_fs_server.indexer import IndexStore
-from ramdisk_fs_server.python_symbols import extract_python_symbols as real_extract_python_symbols
+from ramdisk_fs_server.symbol_extractor import extract_code_symbols
 
 
 class IndexStoreTests(unittest.TestCase):
@@ -158,7 +158,7 @@ class IndexStoreTests(unittest.TestCase):
             )
 
             store = IndexStore()
-            with patch("ramdisk_fs_server.indexer.extract_python_symbols", wraps=real_extract_python_symbols) as mocked:
+            with patch("ramdisk_fs_server.indexer.extract_code_symbols", wraps=extract_code_symbols) as mocked:
                 store.rebuild(root)
                 self.assertEqual(mocked.call_count, 1)
 

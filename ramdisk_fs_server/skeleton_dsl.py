@@ -56,13 +56,13 @@ def render_symbol_dsl(
     lines: list[str] = []
     line_range = f"[L{symbol.line}-L{symbol.end_line}]"
 
-    if symbol.kind == "class":
+    if symbol.kind in ("class", "struct", "enum", "union"):
         inherits_str = ""
         if symbol.inherits:
             resolved_inherits = [resolve_symbol_ref(b, index_store) for b in symbol.inherits]
             inherits_str = f"  # inherits: {', '.join(resolved_inherits)}"
         bases_str = f"({', '.join(symbol.inherits)})" if symbol.inherits else ""
-        lines.append(f"{indent}class {symbol.name}{bases_str}:{inherits_str}")
+        lines.append(f"{indent}{symbol.kind} {symbol.name}{bases_str}:{inherits_str}")
         if symbol.docstring:
             doc_first = symbol.docstring.splitlines()[0]
             lines.append(f'{indent}  """{doc_first}"""')
@@ -85,6 +85,11 @@ def render_symbol_dsl(
         used_by = find_used_by(symbol, index_store)
         if used_by:
             lines.append(f"{indent}  # used_by: {', '.join(used_by[:6])}")
+
+    elif symbol.kind == "macro":
+        lines.append(f"{indent}#define {symbol.name}")
+    elif symbol.kind == "include":
+        lines.append(f"{indent}#include <{symbol.name}>")
 
     return lines
 

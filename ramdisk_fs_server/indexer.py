@@ -15,6 +15,7 @@ from .models import FsEntryModel, FsSnapshot, PythonSymbol, RamDiskInfo
 from .python_symbols import extract_python_symbols
 from .scip_integration import SCIPGraph, build_scip_index, is_scip_available, load_scip_or_fallback
 from .skeleton_dsl import render_contour_skeleton_dsl, render_file_skeleton_dsl
+from .symbol_extractor import C_EXTENSIONS, PYTHON_EXTENSIONS, extract_code_symbols
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 TEXT_SUFFIXES = {
@@ -768,7 +769,10 @@ class IndexStore:
             self.content_index.setdefault(token, set()).add(model.path)
 
     def _index_python_symbols(self, root_path: Path, model: FsEntryModel) -> None:
-        if model.entry_type != "file" or (model.suffix or "").lower() != ".py":
+        if model.entry_type != "file":
+            return
+        suffix = (model.suffix or "").lower()
+        if suffix not in PYTHON_EXTENSIONS and suffix not in C_EXTENSIONS:
             return
         file_path = root_path / model.path if model.path != "." else root_path
         signature = self._model_signature(model)
@@ -777,7 +781,7 @@ class IndexStore:
             symbols, references = cached[1], cached[2]
         else:
             source = self._read_cached_text(root_path, model.path, signature)
-            symbols, references = extract_python_symbols(file_path, model.path, source=source)
+            symbols, references = extract_code_symbols(file_path, model.path, source=source)
             self.python_symbol_cache[model.path] = (signature, symbols, references)
         if not symbols and not references:
             return
@@ -786,7 +790,7 @@ class IndexStore:
         for symbol in symbols:
             self.symbol_index.setdefault(symbol.name.lower(), []).append(symbol)
             self.qualname_index.setdefault(symbol.qualname.lower(), []).append(symbol)
-            if symbol.kind in {"class", "function", "method"}:
+            if symbol.kind in {"class", "function", "method", "struct", "enum", "union", "macro"}:
                 self.symbol_definition_paths.setdefault(symbol.name.lower(), set()).add(symbol.path)
                 self.symbol_definition_paths.setdefault(symbol.qualname.lower(), set()).add(symbol.path)
             if symbol.is_test:

@@ -1,0 +1,92 @@
+{
+  "name": "bm25-skeleton-mcp",
+  "version": "1.0.0",
+  "description": "2-Tier Codebase Representation, Skeleton DSL & BM25 Search MCP Plugin",
+  "command": "python3",
+  "args": [
+    "-m",
+    "ramdisk_fs_mcp",
+    "--root",
+    "."
+  ],
+  "env": {
+    "PYTHONUNBUFFERED": "1"
+  },
+  "tools": [
+    {
+      "name": "get_file_skeleton",
+      "description": "Get token-efficient Skeleton DSL with cross-references ([L15-L42], # calls:, # used_by:) for a specific file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative file path in codebase"
+          }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "get_symbol_contour",
+      "description": "Get Skeleton DSL contour for symbols matching a query name or qualname",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Symbol name or query to build contour for"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of matching symbols to include"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "search_codebase",
+      "description": "Search codebase files and text content using BM25 scoring and return excerpts",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "File path query"
+          },
+          "content": {
+            "type": "string",
+            "description": "Text content query"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of results"
+          }
+        }
+      }
+    },
+    {
+      "name": "ask_codebase",
+      "description": "Answer natural language architectural questions over the codebase and return Skeleton DSL",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "Natural language architectural question"
+          }
+        },
+        "required": ["question"]
+      }
+    },
+    {
+      "name": "get_index_stats",
+      "description": "Get current index statistics (file count, symbol count, BM25 status)",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

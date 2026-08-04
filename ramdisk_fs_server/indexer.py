@@ -13,6 +13,8 @@ from pathlib import Path
 from .fs_tree import build_snapshot
 from .models import FsEntryModel, FsSnapshot, PythonSymbol, RamDiskInfo
 from .python_symbols import extract_python_symbols
+from .scip_integration import SCIPGraph, build_scip_index, is_scip_available, load_scip_or_fallback
+from .skeleton_dsl import render_contour_skeleton_dsl, render_file_skeleton_dsl
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 TEXT_SUFFIXES = {
@@ -94,10 +96,12 @@ class IndexStore:
     rebuild_counter: int = 0
     bm25_average_document_length: float = 0.0
     bm25_ready: bool = False
+    scip_graph: SCIPGraph | None = None
 
     def clear(self, *, preserve_file_caches: bool = False) -> None:
         self.rebuild_counter += 1
         self.query_cache.clear()
+        self.scip_graph = None
         self.snapshot = None
         self.last_built_at = None
         self.by_path.clear()
@@ -168,6 +172,7 @@ class IndexStore:
             child_paths.sort(key=str.lower)
 
         self._build_bm25()
+        self._try_build_scip(root_path, ramdisk)
 
         return self.stats()
 
@@ -365,8 +370,29 @@ class IndexStore:
             "bm25_loaded_in_gpu": False,
             "bm25_documents": len(self.bm25_term_frequencies),
             "bm25_avg_document_length": self.bm25_average_document_length,
+            "scip_available": is_scip_available(),
+            "scip_loaded": self.scip_graph is not None,
             "ignored_names": sorted(self.ignored_names),
         }
+
+    def get_skeleton_dsl(self, path: str) -> str:
+        """Render a file's skeleton DSL with cross-references for AI context."""
+        normalized = self.normalize_path(path)
+        return render_file_skeleton_dsl(normalized, self)
+
+    def get_contour_skeleton_dsl(self, query: str, limit: int = 10) -> str:
+        """Render a search query's matching symbol contour in skeleton DSL format."""
+        symbols = self.search_symbols(query, limit=limit)
+        return render_contour_skeleton_dsl(symbols, self, contour_name=query)
+
+    def _try_build_scip(self, root_path: Path, ramdisk: RamDiskInfo | None) -> None:
+        if not is_scip_available():
+            return
+        out_dir = Path(ramdisk.mount_point) if ramdisk else root_path
+        scip_out = out_dir / "index.scip"
+        built_file = build_scip_index(root_path, scip_out)
+        if built_file:
+            self.scip_graph = load_scip_or_fallback(built_file)
 
     def normalize_path(self, path: str | None) -> str:
         if path is None:

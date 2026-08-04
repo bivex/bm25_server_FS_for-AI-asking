@@ -133,6 +133,9 @@ class PythonSymbol:
     parent: str | None = None
     is_test: bool = False
     docstring: str | None = None
+    inherits: list[str] = field(default_factory=list)
+    calls: list[str] = field(default_factory=list)
+    signature: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,4 +148,7 @@ class PythonSymbol:
             "parent": self.parent,
             "is_test": self.is_test,
             "docstring": self.docstring,
+            "inherits": self.inherits,
+            "calls": self.calls,
+            "signature": self.signature,
         }

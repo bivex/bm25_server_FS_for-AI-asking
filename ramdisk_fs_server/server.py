@@ -266,6 +266,38 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
                 },
             )
 
+        def _handle_index_skeleton(self) -> None:
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            requested_path = params.get("path", [None])[0]
+            index_store = context.active_index_store()
+            if not requested_path:
+                raise ValueError("path parameter is required")
+            skeleton_dsl = index_store.get_skeleton_dsl(str(requested_path))
+            self._send_json(
+                200,
+                {
+                    "path": str(requested_path),
+                    "skeleton_dsl": skeleton_dsl,
+                },
+            )
+
+        def _handle_index_contour(self) -> None:
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            query = params.get("q", [""])[0]
+            limit = int(params.get("limit", ["10"])[0])
+            index_store = context.active_index_store()
+            skeleton_dsl = index_store.get_contour_skeleton_dsl(query, limit=limit)
+            self._send_json(
+                200,
+                {
+                    "query": query,
+                    "limit": limit,
+                    "skeleton_dsl": skeleton_dsl,
+                },
+            )
+
         def _handle_ask_get(self) -> None:
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
@@ -291,6 +323,8 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
                             "GET /index/search?q=...&content=...",
                             "GET /index/symbols?name=...&kind=function",
                             "GET /index/usages?name=...",
+                            "GET /index/skeleton?path=...",
+                            "GET /index/contour?q=...",
                             "GET /ask?q=где+лежит+readme",
                             "POST /ramdisk/create",
                             "POST /index/rebuild",
@@ -321,6 +355,10 @@ def make_handler(context: AppContext) -> type[BaseHTTPRequestHandler]:
                     self._handle_index_symbols()
                 elif parsed.path == "/index/usages":
                     self._handle_index_usages()
+                elif parsed.path == "/index/skeleton":
+                    self._handle_index_skeleton()
+                elif parsed.path == "/index/contour":
+                    self._handle_index_contour()
                 elif parsed.path == "/ask":
                     self._handle_ask_get()
                 else:

@@ -4,8 +4,10 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from .indexer import IndexStore
+from .skeleton_dsl import render_contour_skeleton_dsl
 
 WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 PATH_WORD_RE = re.compile(r"[A-Za-z0-9_./-]+")
@@ -309,7 +311,7 @@ def answer_question(question: str, index_store: IndexStore) -> dict[str, object]
     }
 
 
-def _symbol_answer(ask_query: AskQuery, symbols: list[object], index_store: IndexStore) -> dict[str, object]:
+def _symbol_answer(ask_query: AskQuery, symbols: list[Any], index_store: IndexStore) -> dict[str, object]:
     files = list(dict.fromkeys(symbol.path for symbol in symbols))
     matches = [
         {
@@ -319,6 +321,9 @@ def _symbol_answer(ask_query: AskQuery, symbols: list[object], index_store: Inde
             "kind": symbol.kind,
             "line": symbol.line,
             "end_line": symbol.end_line,
+            "inherits": getattr(symbol, "inherits", []),
+            "calls": getattr(symbol, "calls", []),
+            "signature": getattr(symbol, "signature", None),
             "excerpt": index_store.get_symbol_excerpt(symbol, ask_query.subject or symbol.name),
         }
         for symbol in symbols
@@ -331,12 +336,14 @@ def _symbol_answer(ask_query: AskQuery, symbols: list[object], index_store: Inde
         answer = f"{kind_label.capitalize()} {symbol.qualname} определён в {symbol.path}:{symbol.line}"
     else:
         answer = f"Нашёл {len(symbols)} определений для {ask_query.subject}: {', '.join(files[:3])}"
+    skeleton_dsl = render_contour_skeleton_dsl(symbols, index_store, contour_name=ask_query.subject)
     return {
         "question": ask_query.question,
         "parsed_query": ask_query.to_dict(),
         "answer": answer,
         "files": files,
         "matches": matches,
+        "skeleton_dsl": skeleton_dsl,
     }
 
 

@@ -28,6 +28,40 @@ def extract_python_symbols(
     return visitor.symbols, visitor.references
 
 
+def _extract_calls(node: ast.AST) -> list[str]:
+    calls: list[str] = []
+    seen: set[str] = set()
+
+    class _CallVisitor(ast.NodeVisitor):
+        def visit_Call(self, call_node: ast.Call) -> None:  # noqa: N802
+            try:
+                target = ast.unparse(call_node.func).strip()
+                if target and target not in seen:
+                    seen.add(target)
+                    calls.append(target)
+            except Exception:
+                pass
+            self.generic_visit(call_node)
+
+        def visit_FunctionDef(self, n: ast.FunctionDef) -> None:  # noqa: N802
+            if n is not node:
+                return
+            self.generic_visit(n)
+
+        def visit_AsyncFunctionDef(self, n: ast.AsyncFunctionDef) -> None:  # noqa: N802
+            if n is not node:
+                return
+            self.generic_visit(n)
+
+        def visit_ClassDef(self, n: ast.ClassDef) -> None:  # noqa: N802
+            if n is not node:
+                return
+            self.generic_visit(n)
+
+    _CallVisitor().visit(node)
+    return calls
+
+
 class _PythonSymbolVisitor(ast.NodeVisitor):
     def __init__(self, relative_path: str) -> None:
         self.relative_path = relative_path
@@ -97,6 +131,28 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
         qualname = ".".join([*scope_names, name]) if scope_names else name
         is_test = self.relative_path.startswith("tests/") or name.startswith("test_") or name.startswith("Test")
         docstring = ast.get_docstring(node, clean=True) if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) else None
+
+        inherits: list[str] = []
+        calls: list[str] = []
+        signature: str | None = None
+
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                try:
+                    b_name = ast.unparse(base).strip()
+                    if b_name:
+                        inherits.append(b_name)
+                except Exception:
+                    pass
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            try:
+                args_str = ast.unparse(node.args).strip()
+                ret_str = f" -> {ast.unparse(node.returns).strip()}" if node.returns else ""
+                signature = f"({args_str}){ret_str}"
+            except Exception:
+                signature = None
+            calls = _extract_calls(node)
+
         self.symbols.append(
             PythonSymbol(
                 name=name,
@@ -108,5 +164,8 @@ class _PythonSymbolVisitor(ast.NodeVisitor):
                 parent=".".join(scope_names) if scope_names else None,
                 is_test=is_test,
                 docstring=docstring,
+                inherits=inherits,
+                calls=calls,
+                signature=signature,
             )
         )

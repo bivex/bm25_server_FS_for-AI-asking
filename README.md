@@ -6,6 +6,21 @@ A small Python project for macOS that:
 - serves an HTTP JSON API
 - exposes the root contents as typed models and a tree with technical file metadata
 - automatically initializes an optimized **BM25 search index** at server startup and keeps it in RAM
+- extracts symbols and cross-references (xrefs) across multiple programming languages via AST & `ast-grep` engines
+
+## Supported Programming Languages
+
+The multi-language symbol extraction engine automatically indexes declarations, signatures, line ranges, and cross-reference call graphs (`calls` / `used_by`) for:
+
+| Language | Extensions | Extracted Symbols & Features | Parsing Engine |
+|---|---|---|---|
+| **Python** | `.py` | Classes, Functions, Methods, Imports, Docstrings, Signatures, Inheritance, Calls | Native AST + `ast-grep` |
+| **C** | `.c`, `.h` | `#include` Directives, `#define` Macros, Structs, Enums, Unions, Functions, Calls | Native C Parser + `ast-grep` |
+| **C++** | `.cpp`, `.hpp`, `.cc` | Classes, Structs, Enums, Inheritance, Methods, Functions, Signatures, Calls | Native C/C++ + `ast-grep` |
+| **JavaScript** | `.js`, `.jsx` | Classes, Functions, Methods, Arrow Functions, Calls | `ast-grep` (Tree-sitter AST) |
+| **TypeScript** | `.ts`, `.tsx` | Classes, Interfaces, Functions, Methods, Arrow Functions, Calls | `ast-grep` (Tree-sitter AST) |
+| **Go** | `.go` | Structs, Interfaces, Functions, Methods, Calls | `ast-grep` (Tree-sitter AST) |
+| **Rust** | `.rs` | Structs, Enums, Traits, Impl Blocks, Functions, Calls | `ast-grep` (Tree-sitter AST) |
 
 ## Run
 

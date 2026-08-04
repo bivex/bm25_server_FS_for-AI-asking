@@ -82,6 +82,40 @@ def extract_ast_grep_symbols(
         logger.warning("ast-grep parse error for %s: %s", relative_path, e)
         return [], Counter()
 
+    # 0. Includes & Macros (for C/C++)
+    if lang in ("c", "cpp"):
+        for inc_node in root.find_all(kind="preproc_include"):
+            rng = inc_node.range()
+            start_line = rng.start.line + 1
+            inc_text = inc_node.text().replace("#include", "").strip(" <>\"")
+            symbols.append(
+                PythonSymbol(
+                    name=inc_text,
+                    qualname=inc_text,
+                    kind="include",
+                    path=relative_path,
+                    line=start_line,
+                    end_line=start_line,
+                    language=lang,
+                )
+            )
+        for def_node in root.find_all(kind="preproc_def"):
+            rng = def_node.range()
+            start_line = rng.start.line + 1
+            name_node = def_node.field("name")
+            def_name = name_node.text() if name_node else def_node.text().split()[1] if len(def_node.text().split()) > 1 else "macro"
+            symbols.append(
+                PythonSymbol(
+                    name=def_name,
+                    qualname=def_name,
+                    kind="macro",
+                    path=relative_path,
+                    line=start_line,
+                    end_line=start_line,
+                    language=lang,
+                )
+            )
+
     # 1. Functions / Methods
     fn_kinds = FUNCTION_KINDS.get(lang, [])
     for fn_kind in fn_kinds:

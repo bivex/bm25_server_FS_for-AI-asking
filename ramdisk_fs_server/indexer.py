@@ -15,7 +15,7 @@ from .models import FsEntryModel, FsSnapshot, PythonSymbol, RamDiskInfo
 from .python_symbols import extract_python_symbols
 from .scip_integration import SCIPGraph, build_scip_index, is_scip_available, load_scip_or_fallback
 from .skeleton_dsl import render_contour_skeleton_dsl, render_file_skeleton_dsl
-from .symbol_extractor import C_EXTENSIONS, PYTHON_EXTENSIONS, extract_code_symbols
+from .symbol_extractor import C_EXTENSIONS, OTHER_EXTENSIONS, PYTHON_EXTENSIONS, extract_code_symbols
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 TEXT_SUFFIXES = {
@@ -772,7 +772,7 @@ class IndexStore:
         if model.entry_type != "file":
             return
         suffix = (model.suffix or "").lower()
-        if suffix not in PYTHON_EXTENSIONS and suffix not in C_EXTENSIONS:
+        if suffix not in PYTHON_EXTENSIONS and suffix not in C_EXTENSIONS and suffix not in OTHER_EXTENSIONS:
             return
         file_path = root_path / model.path if model.path != "." else root_path
         signature = self._model_signature(model)

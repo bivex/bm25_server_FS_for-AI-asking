@@ -22,7 +22,14 @@ class IndexStoreAdapter(IndexPort):
         return self._store
 
     def rebuild(self, root: Path) -> dict[str, Any]:
-        return self._store.rebuild(root)
+        cache_file = root / ".ramdisk_cache.pkl"
+        if cache_file.exists() and self._store.snapshot is None:
+            self._store.load_disk_cache(cache_file)
+            stats = self._store.rebuild_incremental(root)
+        else:
+            stats = self._store.rebuild(root)
+        self._store.save_disk_cache(cache_file)
+        return stats
 
     def get_file_skeleton(self, path: str) -> DomainSkeleton:
         dsl = self._store.get_skeleton_dsl(path)

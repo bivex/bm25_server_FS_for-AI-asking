@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import pickle
 import re
 import time
 from collections.abc import Callable
@@ -394,6 +395,38 @@ class IndexStore:
         built_file = build_scip_index(root_path, scip_out)
         if built_file:
             self.scip_graph = load_scip_or_fallback(built_file)
+
+    def save_disk_cache(self, cache_file: Path) -> bool:
+        """Persist index state and symbol caches to disk / RAM Disk for instant startup."""
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "file_signature_cache": self.file_signature_cache,
+                "python_symbols": [s.to_dict() for s in self.python_symbols],
+                "last_built_at": self.last_built_at,
+                "cache_root": self.cache_root,
+            }
+            cache_file.write_bytes(pickle.dumps(data))
+            return True
+        except Exception:
+            return False
+
+    def load_disk_cache(self, cache_file: Path) -> bool:
+        """Load index state from disk / RAM Disk cache if valid."""
+        if not cache_file.exists():
+            return False
+        try:
+            data = pickle.loads(cache_file.read_bytes())
+            if not data or not data.get("cache_root"):
+                return False
+            self.cache_root = data["cache_root"]
+            self.last_built_at = data.get("last_built_at")
+            self.file_signature_cache = data.get("file_signature_cache", {})
+            sym_dicts = data.get("python_symbols", [])
+            self.python_symbols = [PythonSymbol(**d) for d in sym_dicts]
+            return True
+        except Exception:
+            return False
 
     def normalize_path(self, path: str | None) -> str:
         if path is None:

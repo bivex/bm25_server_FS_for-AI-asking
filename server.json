@@ -1,0 +1,13 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "bm25-skeleton-mcp",
+  "description": "2-Tier Codebase Representation, Skeleton DSL & BM25 Search MCP Server",
+  "version": "1.0.0",
+  "command": "python3",
+  "args": [
+    "-m",
+    "ramdisk_fs_mcp",
+    "--root",
+    "."
+  ]
+}

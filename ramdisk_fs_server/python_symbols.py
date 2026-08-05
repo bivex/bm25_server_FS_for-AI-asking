@@ -32,15 +32,22 @@ def _extract_calls(node: ast.AST) -> list[str]:
     calls: list[str] = []
     seen: set[str] = set()
 
-    for child in ast.walk(node):
-        if isinstance(child, ast.Call):
+    # Iterative BFS traversal to prevent RecursionError on deeply nested ASTs
+    queue = [(node, 0)]
+    while queue:
+        curr, depth = queue.pop(0)
+        if depth > 30:  # Cap AST depth to 30 levels
+            continue
+        if isinstance(curr, ast.Call):
             try:
-                target = ast.unparse(child.func).strip()
+                target = ast.unparse(curr.func).strip()
                 if target and target not in seen:
                     seen.add(target)
                     calls.append(target)
             except Exception:
                 pass
+        for child in ast.iter_child_nodes(curr):
+            queue.append((child, depth + 1))
     return calls
 
 

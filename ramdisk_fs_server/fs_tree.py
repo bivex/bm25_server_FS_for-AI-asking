@@ -119,9 +119,9 @@ def build_snapshot(
             entries = []
 
         for child in entries:
-            if child.name in ignored:
-                continue
             child_rel = child.name if rel_prefix == "." else f"{rel_prefix}/{child.name}"
+            if child.name in ignored or any(p in ignored for p in child_rel.split("/")):
+                continue
             try:
                 st = child.stat(follow_symlinks=False)
                 is_symlink = child.is_symlink()
@@ -165,9 +165,9 @@ def build_snapshot(
             return []
 
         for child in entries:
-            if child.name in ignored:
-                continue
             child_rel = f"{rel_prefix}/{child.name}"
+            if child.name in ignored or any(p in ignored for p in child_rel.split("/")):
+                continue
             try:
                 st = child.stat(follow_symlinks=False)
                 is_symlink = child.is_symlink()
